@@ -55,6 +55,7 @@ class RoverSonar {
   bool _braking = false;
   uint32_t _last_read_ms = 0;
   uint32_t _wiggle_t0_ms = 0;
+  uint32_t _last_pan_write_ms = 0;
   float _range_ring[3] = {-1.0f, -1.0f, -1.0f};
   uint8_t _range_ring_n = 0;
 };

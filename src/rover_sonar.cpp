@@ -27,6 +27,16 @@
 #ifndef SONAR_BOOT_PAN_MS
 #define SONAR_BOOT_PAN_MS 200
 #endif
+// PCA9685 outputs a 50 Hz (20 ms) PWM cycle in hardware. Writing a new
+// ON/OFF register value more than once per cycle risks landing the write
+// right as the chip's internal counter wraps, tearing that cycle's pulse —
+// a real, constant glitch, not a "cheap chip" limitation. Throttle well
+// clear of that: 33 ms (~30 Hz) never lands twice in the same 20 ms window,
+// and at the wiggle's peak angular rate this is still a <1° step — smooth
+// to the eye.
+#ifndef SONAR_PAN_WRITE_MS
+#define SONAR_PAN_WRITE_MS 33
+#endif
 
 namespace {
 
@@ -85,6 +95,10 @@ void RoverSonar::update_pan_wiggle(uint32_t now_ms) {
   if (!_pca) {
     return;
   }
+  if (now_ms - _last_pan_write_ms < SONAR_PAN_WRITE_MS) {
+    return;
+  }
+  _last_pan_write_ms = now_ms;
   const float center = center_pan();
   const float t = static_cast<float>((now_ms - _wiggle_t0_ms) % SONAR_GLANCE_PERIOD_MS) /
                   static_cast<float>(SONAR_GLANCE_PERIOD_MS);
