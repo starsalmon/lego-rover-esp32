@@ -1,0 +1,10 @@
+; Copy to platformio_private.ini (gitignored) and set your WiFi credentials.
+; Merged via [rover_wifi] — does not replace per-env build_flags.
+
+[rover_wifi]
+build_flags =
+  -DROVER_WIFI_SSID=\"YourSSID\"
+  -DROVER_WIFI_PASS=\"YourPassword\"
+  -DROVER_TELEM_HOST=\"192.168.2.31\"
+  ; optional OTA upload password:
+  ; -DROVER_OTA_PASS=\"rover\"
