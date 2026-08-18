@@ -49,6 +49,21 @@ struct RoverUiData {
   uint8_t ir_i2c_addrs[8] = {};  // devices seen on last bus scan
   int ir_sda_pin = -1;
   int ir_scl_pin = -1;
+  bool sonar_enabled = false;
+  float sonar_pan_deg = 90.0f;
+  float sonar_range_m = -1.0f;
+  bool sonar_cal_active = false;
+  uint8_t sonar_cal_snap_count = 0;
+  float sonar_cal_snap_pan[4] = {};
+  float sonar_cal_snap_range[4] = {};
+  uint32_t sonar_cal_summary_until_ms = 0;
+  bool tof_enabled = false;
+  bool tof_left_ok = false;
+  bool tof_right_ok = false;
+  float tof_left_m = -1.0f;
+  float tof_right_m = -1.0f;
+  const char *boot_reason = nullptr;
+  uint32_t boot_reason_until_ms = 0;
 };
 
 class RoverDisplay {

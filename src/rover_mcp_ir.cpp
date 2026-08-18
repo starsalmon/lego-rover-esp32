@@ -32,6 +32,7 @@ static_assert(kBodyIodir == 0xC7, "IODIR: in 0-2,6-7 out 3-5");
 }  // namespace
 
 bool Mcp23008::writeReg(uint8_t reg, uint8_t val) {
+  RoverI2cGuard guard;
   rover_i2c_touch();
   Wire.beginTransmission(_addr);
   Wire.write(reg);
@@ -40,6 +41,7 @@ bool Mcp23008::writeReg(uint8_t reg, uint8_t val) {
 }
 
 bool Mcp23008::readReg(uint8_t reg, uint8_t &val) const {
+  RoverI2cGuard guard;
   rover_i2c_touch();
   Wire.beginTransmission(_addr);
   Wire.write(reg);

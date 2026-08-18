@@ -49,6 +49,7 @@ bool Mpu6050::read(float &ax, float &ay, float &az, float &gx, float &gy, float 
 }
 
 bool Mpu6050::_write(uint8_t reg, uint8_t val) {
+  RoverI2cGuard guard;
   rover_i2c_touch();
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(reg);
@@ -57,6 +58,7 @@ bool Mpu6050::_write(uint8_t reg, uint8_t val) {
 }
 
 bool Mpu6050::_read(uint8_t reg, uint8_t *buf, size_t len) {
+  RoverI2cGuard guard;
   rover_i2c_touch();
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(reg);

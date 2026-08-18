@@ -2,6 +2,16 @@
 
 #include <cmath>
 
+#ifndef WHEEL_STALL_MOTOR
+#define WHEEL_STALL_MOTOR 0.05f
+#endif
+#ifndef STALL_ARM_MS
+#define STALL_ARM_MS 350
+#endif
+#ifndef STALL_COOLDOWN_MS
+#define STALL_COOLDOWN_MS 1500
+#endif
+
 void MotionDetect::begin() {
   _lp_ax = 0.0f;
   _lp_ay = 0.0f;
@@ -10,7 +20,6 @@ void MotionDetect::begin() {
   _last_stall_ms = 0;
   _wheel_ref_ticks = 0;
   _wheel_ref_ms = 0;
-  _yaw_accum_rad = 0.0f;
   _last_ms = 0;
   _stall = false;
 }
@@ -31,6 +40,7 @@ void MotionDetect::update(float ax, float ay, float az, float gx, float gy, floa
   (void)az;
   (void)gx;
   (void)gy;
+  (void)gz;
 
   _stall = false;
 
@@ -43,30 +53,27 @@ void MotionDetect::update(float ax, float ay, float az, float gx, float gy, floa
     }
   }
   _last_ms = now_ms;
+  (void)dt;
 
   if (motor < STALL_MOTOR) {
     _drive_since = 0;
     _wheel_ref_ticks = wheel_l_ticks + wheel_r_ticks;
     _wheel_ref_ms = now_ms;
-    _yaw_accum_rad = 0.0f;
     return;
   }
-
-  _yaw_accum_rad += fabsf(gz) * dt;
 
   if (_drive_since == 0) {
     _drive_since = now_ms;
     _wheel_ref_ticks = wheel_l_ticks + wheel_r_ticks;
     _wheel_ref_ms = now_ms;
-    _yaw_accum_rad = 0.0f;
     return;
   }
 
-  if (now_ms - _drive_since < STALL_ARM_MS) {
+  if (now_ms - _drive_since < static_cast<uint32_t>(STALL_ARM_MS)) {
     return;
   }
 
-  if (now_ms - _last_stall_ms <= STALL_COOLDOWN_MS) {
+  if (now_ms - _last_stall_ms <= static_cast<uint32_t>(STALL_COOLDOWN_MS)) {
     return;
   }
 
@@ -79,26 +86,22 @@ void MotionDetect::update(float ax, float ay, float az, float gx, float gy, floa
     return;
   }
 
-  const bool low_ticks =
-      motor >= WHEEL_STALL_MOTOR &&
-      tick_delta < static_cast<uint32_t>(STALL_TICKS_REQUIRED);
+  // Stall = motors commanded but wheel IR saw no rotation at all in the window.
+  // Do NOT use yaw/IMU here — straight driving has ~0 yaw rate and the old
+  // "anchor_stall" path false-triggered constantly while cruising a hallway.
+  const bool no_wheel_motion =
+      motor >= WHEEL_STALL_MOTOR && tick_delta < static_cast<uint32_t>(STALL_TICKS_REQUIRED);
 
-  const bool anchor_stall = motor >= WHEEL_STALL_MOTOR &&
-                            tick_delta >= static_cast<uint32_t>(STALL_TICKS_REQUIRED) &&
-                            _yaw_accum_rad < ANCHOR_YAW_MIN_RAD;
-
-  if (low_ticks || anchor_stall) {
+  if (no_wheel_motion) {
     _stall = true;
     _last_stall_ms = now_ms;
     _drive_since = now_ms;
-    _wheel_ref_ticks = combined_ticks;
-    _wheel_ref_ms = now_ms;
-    _yaw_accum_rad = 0.0f;
-  } else {
-    _wheel_ref_ticks = combined_ticks;
-    _wheel_ref_ms = now_ms;
-    _yaw_accum_rad = 0.0f;
+    Serial.printf("STALL no_ticks delta=%u win=%ums motor=%.2f\n",
+                  (unsigned)tick_delta, (unsigned)window_ms, motor);
   }
+
+  _wheel_ref_ticks = combined_ticks;
+  _wheel_ref_ms = now_ms;
 }
 
 void MotionDetect::clear_events() {

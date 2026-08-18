@@ -21,16 +21,10 @@ class MotionDetect {
   uint32_t _wheel_ref_ticks = 0;
   uint32_t _wheel_ref_ms = 0;
   uint32_t _last_ms = 0;
-  float _yaw_accum_rad = 0.0f;
   float _lp_ax = 0.0f;
   float _lp_ay = 0.0f;
   float _lp_az = 1.0f;
   bool _stall = false;
 
   static constexpr float STALL_MOTOR = 0.04f;
-  static constexpr float WHEEL_STALL_MOTOR = 0.05f;
-  static constexpr uint32_t STALL_ARM_MS = 350;
-  static constexpr uint32_t STALL_COOLDOWN_MS = 1500;
-  // Wheels turning but body barely rotates (slip / push against wall).
-  static constexpr float ANCHOR_YAW_MIN_RAD = 0.10f;
 };

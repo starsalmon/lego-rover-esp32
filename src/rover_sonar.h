@@ -37,10 +37,30 @@ class RoverSonar {
   void set_aux_scan(RoverMcpIr* ir);
   void boot_full_sweep();
 
+  /** Bench validation: sweep 90° → 180° → 0° → 90° with dwell at each stop. */
+  void set_cal_sweep(bool active);
+  bool cal_sweep_active() const { return _cal_sweep_active; }
+  uint8_t cal_step() const { return _cal_step; }
+  uint8_t cal_snap_count() const { return _cal_snap_count; }
+  float cal_snap_pan(uint8_t idx) const;
+  float cal_snap_range(uint8_t idx) const;
+  /** Main loop: sample range when a cal dwell step completes. */
+  void service_cal_capture();
+
+  /** When enabled (explore / bench cal), run the cruise pan wiggle.
+   *  When disabled (standby idle), hold center — independent of wheel motion. */
+  void set_pan_scan_enabled(bool enabled);
+
+  /** Drives the smooth sine cruise-wiggle. Called from a dedicated
+   *  FreeRTOS task on its own fixed schedule, NOT from the main loop —
+   *  the main loop's period varies with display/network work (10-150ms),
+   *  and driving the servo target off that jitter is what caused visible
+   *  jerkiness even though the PCA9685 write itself was atomic. */
+  void update_pan_wiggle(uint32_t now_ms);
+
  private:
   void set_pan(float deg);
   float read_range();
-  void update_pan_wiggle(uint32_t now_ms);
   void push_range_sample(float range_m);
   bool closing_trend() const;
   void note_glance_sample(float pan_deg, float range_m);
@@ -50,12 +70,22 @@ class RoverSonar {
   RoverMcpIr* _mcp_ir = nullptr;
   float _pan_deg = 90.0f;
   float _last_range_m = -1.0f;
+  float _last_forward_range_m = -1.0f;
   float _glance_left_m = -1.0f;
   float _glance_right_m = -1.0f;
   bool _braking = false;
   uint32_t _last_read_ms = 0;
   uint32_t _wiggle_t0_ms = 0;
   uint32_t _last_pan_write_ms = 0;
+  volatile bool _pan_scan_enabled = false;
+  volatile bool _cal_sweep_active = false;
+  uint8_t _cal_step = 0;
+  uint32_t _cal_step_ms = 0;
+  volatile bool _cal_capture_pending = false;
+  volatile float _cal_capture_pan = 90.0f;
+  uint8_t _cal_snap_count = 0;
+  float _cal_snap_pan[4] = {90.0f, 90.0f, 90.0f, 90.0f};
+  float _cal_snap_range[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
   float _range_ring[3] = {-1.0f, -1.0f, -1.0f};
   uint8_t _range_ring_n = 0;
 };

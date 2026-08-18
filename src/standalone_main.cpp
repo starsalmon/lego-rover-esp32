@@ -304,20 +304,22 @@ static void apply_drive(float yaw_rate, float dt) {
 static void calibrate_gyro() {
   if (!mpu.ok()) return;
   Serial.println("MPU gyro cal — hold rover still...");
-  float sum_gz = 0.0f;
-  int n = 0;
-  for (int i = 0; i < 200; i++) {
+  heading.begin();
+  uint32_t prev_ms = millis();
+  const uint32_t t0 = prev_ms;
+  while (millis() - t0 < 2800) {
     float ax, ay, az, gx, gy, gz;
+    const uint32_t now = millis();
+    float dt = (now - prev_ms) / 1000.0f;
+    prev_ms = now;
+    if (dt < 0.001f) {
+      dt = 0.001f;
+    }
     if (mpu.read(ax, ay, az, gx, gy, gz)) {
-      sum_gz += imu_yaw_rate(gx, gy, gz);
-      n++;
+      heading.update(imu_yaw_rate(gx, gy, gz), dt, true);
     }
     delay(5);
     yield();
-  }
-  if (n > 0) {
-    heading.calibrate_bias(sum_gz / (float)n);
-    heading.reset_angle();
   }
 }
 
@@ -376,7 +378,7 @@ static bool tick_boot_spin_trick(uint32_t now) {
 
   float ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
   if (mpu.read(ax, ay, az, gx, gy, gz)) {
-    heading.integrate_gyro(imu_yaw_rate(gx, gy, gz), dt);
+    heading.update(imu_yaw_rate(gx, gy, gz), dt, false);
   }
 
   constexpr uint32_t kSpinTimeoutMs = 12000;
@@ -643,10 +645,14 @@ void loop() {
   float ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
   const bool imu_ok = mpu.ok() && mpu.read(ax, ay, az, gx, gy, gz);
   const float yaw_rate = imu_ok ? imu_yaw_rate(gx, gy, gz) : 0.0f;
+  const bool imu_still =
+      (now - last_drive_ms >= 400) && fabsf(drv.cur_left()) <= 0.04f &&
+      fabsf(drv.cur_right()) <= 0.04f && fabsf(drv.tgt_left()) <= 0.04f &&
+      fabsf(drv.tgt_right()) <= 0.04f;
   if (imu_ok) {
-    heading.integrate_gyro(yaw_rate, dt);
+    heading.update(yaw_rate, dt, imu_still);
   }
-  const float yaw_deg = imu_ok ? heading.angle_deg() : 0.0f;
+  const float yaw_deg = imu_ok ? heading.angle_deg_wrapped() : 0.0f;
 
   {
     const bool cmd_fresh = (now - last_drive_ms) <= 400;

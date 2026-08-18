@@ -4,6 +4,7 @@
 
 #include "rover_pca9685.h"
 #include "rover_pins_s3.h"
+#include "rover_diag.h"
 #include "ultrasonic.h"
 
 #ifndef SONAR_STOP_M
@@ -22,7 +23,7 @@
 #define SONAR_GLANCE_MAG_DEG 12.0f
 #endif
 #ifndef SONAR_GLANCE_PERIOD_MS
-#define SONAR_GLANCE_PERIOD_MS 2800
+#define SONAR_GLANCE_PERIOD_MS 2200
 #endif
 #ifndef SONAR_BOOT_PAN_MS
 #define SONAR_BOOT_PAN_MS 200
@@ -75,6 +76,64 @@ bool RoverSonar::begin(Ultrasonic* sonar, RoverPca9685* pca) {
 
 void RoverSonar::set_aux_scan(RoverMcpIr* ir) { _mcp_ir = ir; }
 
+void RoverSonar::set_pan_scan_enabled(bool enabled) {
+  if (enabled == _pan_scan_enabled) {
+    return;
+  }
+  _pan_scan_enabled = enabled;
+  if (!enabled) {
+    _wiggle_t0_ms = millis();
+  }
+}
+
+float RoverSonar::cal_snap_pan(uint8_t idx) const {
+  return (idx < _cal_snap_count) ? _cal_snap_pan[idx] : -1.0f;
+}
+
+float RoverSonar::cal_snap_range(uint8_t idx) const {
+  return (idx < _cal_snap_count) ? _cal_snap_range[idx] : -1.0f;
+}
+
+void RoverSonar::service_cal_capture() {
+  if (!_cal_capture_pending) {
+    return;
+  }
+  _cal_capture_pending = false;
+  if (_cal_snap_count >= 4) {
+    return;
+  }
+  const float rng = read_range();
+  if (rng > 0.0f) {
+    _last_range_m = rng;
+  }
+  _cal_snap_pan[_cal_snap_count] = _cal_capture_pan;
+  _cal_snap_range[_cal_snap_count] = (rng > 0.0f) ? rng : _last_range_m;
+  ++_cal_snap_count;
+}
+
+void RoverSonar::set_cal_sweep(bool active) {
+  if (!active) {
+    _cal_sweep_active = false;
+    _cal_step = 0;
+    _cal_step_ms = 0;
+    _cal_capture_pending = false;
+    return;
+  }
+  if (_cal_sweep_active) {
+    return;
+  }
+  _cal_sweep_active = true;
+  _cal_step = 0;
+  _cal_step_ms = 0;
+  _cal_snap_count = 0;
+  _cal_capture_pending = false;
+  for (uint8_t i = 0; i < 4; i++) {
+    _cal_snap_pan[i] = center_pan();
+    _cal_snap_range[i] = -1.0f;
+  }
+  rover_diag_ckpt(kCkptCalStart);
+}
+
 void RoverSonar::set_pan(float deg) {
   _pan_deg = clamp_pan(deg);
   if (_pca) {
@@ -88,16 +147,59 @@ float RoverSonar::read_range() {
     return -1.0f;
   }
   const float m = _sonar->read_range_m();
-  return (m > 0.01f && m < 4.0f) ? m : -1.0f;
+  return (m > 0.01f && m < 4.35f) ? m : -1.0f;
 }
 
 void RoverSonar::update_pan_wiggle(uint32_t now_ms) {
   if (!_pca) {
     return;
   }
+
+  if (_cal_sweep_active) {
+    static constexpr float kCalAngles[] = {90.0f, 180.0f, 0.0f, 90.0f};
+    static constexpr uint8_t kCalCount = 4;
+#ifndef SONAR_CAL_DWELL_MS
+#define SONAR_CAL_DWELL_MS 900
+#endif
+    if (_cal_step >= kCalCount) {
+      _cal_sweep_active = false;
+      rover_diag_ckpt(kCkptPanCalDone, _cal_snap_count);
+      return;
+    }
+    if (_cal_step_ms == 0) {
+      if (now_ms - _last_pan_write_ms < SONAR_PAN_WRITE_MS) {
+        return;
+      }
+      _last_pan_write_ms = now_ms;
+      set_pan(kCalAngles[_cal_step]);
+      _cal_step_ms = now_ms;
+      rover_diag_ckpt(kCkptCalPanMove, static_cast<uint32_t>(kCalAngles[_cal_step]));
+      return;
+    }
+    if (now_ms - _cal_step_ms < static_cast<uint32_t>(SONAR_CAL_DWELL_MS)) {
+      return;
+    }
+    _cal_capture_pan = kCalAngles[_cal_step];
+    _cal_capture_pending = true;
+    rover_diag_ckpt(kCkptCalDwellEnd, static_cast<uint32_t>(kCalAngles[_cal_step]));
+    _cal_step++;
+    _cal_step_ms = 0;
+    return;
+  }
+
   if (now_ms - _last_pan_write_ms < SONAR_PAN_WRITE_MS) {
     return;
   }
+
+  if (!_pan_scan_enabled) {
+    const float center = center_pan();
+    if (fabsf(_pan_deg - center) > 0.5f) {
+      _last_pan_write_ms = now_ms;
+      set_pan(center);
+    }
+    return;
+  }
+
   _last_pan_write_ms = now_ms;
   const float center = center_pan();
   const float t = static_cast<float>((now_ms - _wiggle_t0_ms) % SONAR_GLANCE_PERIOD_MS) /
@@ -158,23 +260,38 @@ bool RoverSonar::tick(uint32_t now_ms, float cmd_lin, float cmd_ang, bool body_m
   (void)body_moving;
   (void)yaw_deg;
 
-  update_pan_wiggle(now_ms);
+  // Pan wiggle is driven by a dedicated task now (see update_pan_wiggle
+  // doc comment) so it keeps a steady cadence regardless of how long this
+  // tick() call (and the rest of the main loop) takes.
 
-  if (now_ms - _last_read_ms >= SONAR_FORWARD_READ_MS) {
+  if (now_ms - _last_read_ms >= static_cast<uint32_t>(SONAR_FORWARD_READ_MS)) {
     _last_read_ms = now_ms;
     const float rng = read_range();
     if (rng > 0.0f) {
       _last_range_m = rng;
-      push_range_sample(rng);
       note_glance_sample(_pan_deg, rng);
+      const float center = center_pan();
+      if (fabsf(_pan_deg - center) <= SONAR_GLANCE_MAG_DEG * 0.45f) {
+        _last_forward_range_m = rng;
+        push_range_sample(rng);
+      }
     }
+  }
+  if (_cal_capture_pending) {
+    const uint8_t before = _cal_snap_count;
+    service_cal_capture();
+    if (_cal_snap_count > before) {
+      rover_diag_ckpt(kCkptCalCapture, static_cast<uint32_t>(_cal_snap_pan[_cal_snap_count - 1]));
+    }
+  } else {
+    service_cal_capture();
   }
 
   const bool forward = cmd_lin > 0.04f;
   _braking = false;
-  if (forward && _last_range_m > 0.0f) {
-    if (_last_range_m < SONAR_STOP_M ||
-        (closing_trend() && _last_range_m < SONAR_AVOID_M)) {
+  const float fwd_rng = _last_forward_range_m;
+  if (forward && fwd_rng > 0.0f) {
+    if (fwd_rng < SONAR_STOP_M || (closing_trend() && fwd_rng < SONAR_AVOID_M)) {
       _braking = true;
     }
   }

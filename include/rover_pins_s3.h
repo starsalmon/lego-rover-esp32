@@ -36,7 +36,15 @@
 #define MPU_SCL 44
 #endif
 
-// Pi micro-ROS UART — Serial1 per LilyGO SerialExample (RX=17, TX=18)
+// Legacy Pi UART header (IO17/IO18) — repurposed for VL53L1X XSHUT when Pi is removed.
+#ifndef VL53L_XSHUT_L
+#define VL53L_XSHUT_L 17  // was PI_UART_RX
+#endif
+#ifndef VL53L_XSHUT_R
+#define VL53L_XSHUT_R 18  // was PI_UART_TX
+#endif
+
+// Pi UART (legacy — unused on WiFi micro-ROS rover; pins may be VL53L XSHUT).
 #ifndef PI_UART_PORT
 #define PI_UART_PORT 1
 #define PI_UART_RX 17
@@ -109,7 +117,7 @@
 #endif
 
 #ifndef SONAR_GLANCE_MAG_DEG
-#define SONAR_GLANCE_MAG_DEG 12.0f
+#define SONAR_GLANCE_MAG_DEG 22.0f
 #endif
 #ifndef SONAR_GLANCE_PERIOD_MS
 #define SONAR_GLANCE_PERIOD_MS 2800
@@ -155,7 +163,9 @@
 #endif
 #ifndef SONAR_PAN_TRIM_DEG
 // Fine offset if mechanical center drifts (0 = centered on horn). + = pan left.
-#define SONAR_PAN_TRIM_DEG 5.0f
+// Was +5 (biased left) — bench sweep was visibly further left than right, so
+// flipped to -5 (pan right) to bring the center back to true forward.
+#define SONAR_PAN_TRIM_DEG -5.0f
 #endif
 #ifndef SONAR_PAN_INVERT
 // 0 = normal mount. Set 1 only if horn is reversed on the spline (not a bracket flip).
@@ -196,10 +206,19 @@
 #define ROVER_CRUISE_MAX_LIN 0.15f
 #endif
 #ifndef STALL_TICKS_REQUIRED
-#define STALL_TICKS_REQUIRED 2
+#define STALL_TICKS_REQUIRED 1
 #endif
 #ifndef STALL_TICK_WINDOW_CRUISE_MS
-#define STALL_TICK_WINDOW_CRUISE_MS 1400
+#define STALL_TICK_WINDOW_CRUISE_MS 1500
+#endif
+#ifndef STALL_ARM_MS
+#define STALL_ARM_MS 500
+#endif
+#ifndef STALL_COOLDOWN_MS
+#define STALL_COOLDOWN_MS 2000
+#endif
+#ifndef WHEEL_STALL_MOTOR
+#define WHEEL_STALL_MOTOR 0.08f
 #endif
 #ifndef ROVER_BURST_MAX_LIN
 #define ROVER_BURST_MAX_LIN 0.40f
@@ -225,6 +244,14 @@
 
 #ifndef PCA9685_ADDR
 #define PCA9685_ADDR 0x40
+#endif
+
+// VL53L1X side ToF — XSHUT on GPIO 17/18 (ex-Pi UART header). Shared I2C 43/44.
+#ifndef VL53L_ADDR_L
+#define VL53L_ADDR_L 0x30
+#endif
+#ifndef VL53L_ADDR_R
+#define VL53L_ADDR_R 0x31
 #endif
 
 #ifndef STATUS_LED_PIN

@@ -296,6 +296,31 @@ static const char *power_action_name(uint8_t action) {
   }
 }
 
+static void print_range_value(TFT_eSprite &g, float range_m) {
+  if (range_m < 0.01f) {
+    g.print("---");
+    return;
+  }
+  if (range_m < 2.0f) {
+    g.printf("%dcm", static_cast<int>(range_m * 100.0f + 0.5f));
+  } else {
+    g.printf("%.1fm", range_m);
+  }
+}
+
+static float snap_range_near(const RoverUiData &data, float pan_deg) {
+  float best = -1.0f;
+  float best_err = 999.0f;
+  for (uint8_t i = 0; i < data.sonar_cal_snap_count; i++) {
+    const float err = fabsf(data.sonar_cal_snap_pan[i] - pan_deg);
+    if (err < best_err) {
+      best_err = err;
+      best = data.sonar_cal_snap_range[i];
+    }
+  }
+  return (best_err <= 12.0f) ? best : -1.0f;
+}
+
 static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t now_ms) {
   int y = y0;
 
@@ -308,6 +333,15 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
     g.print(stable_mode_label(data.mode, now_ms));
   }
   y += 22;
+
+  if (data.boot_reason && data.boot_reason_until_ms > now_ms) {
+    g.setTextSize(1);
+    g.setTextColor(TFT_ORANGE, TFT_BLACK);
+    g.setCursor(kTextX, y);
+    g.print(data.boot_reason);
+    y += 12;
+    g.setTextSize(2);
+  }
 
   if (!data.session_active && !data.mode_menu && data.link_state == 2) {
     g.setTextSize(2);
@@ -335,6 +369,19 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
   g.printf("BAT %.1fV%s", data.bat_v, data.bat_critical ? "!" : (data.bat_low ? "?" : ""));
   y += kLineH2;
 
+#if defined(ROVER_VL53L)
+  {
+    const bool any_ok = data.tof_left_ok || data.tof_right_ok;
+    g.setTextColor(any_ok ? TFT_GREEN : TFT_RED, TFT_BLACK);
+    g.setCursor(kTextX, y);
+    g.print("ToF L ");
+    print_range_value(g, data.tof_left_ok ? data.tof_left_m : -1.0f);
+    g.print("  R ");
+    print_range_value(g, data.tof_right_ok ? data.tof_right_m : -1.0f);
+    y += kLineH2;
+  }
+#endif
+
   g.setTextColor(TFT_WHITE, TFT_BLACK);
   g.setCursor(kTextX, y);
   g.printf("L %.2f  R %.2f", data.motor_l, data.motor_r);
@@ -343,6 +390,64 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
   g.setCursor(kTextX, y);
   g.printf("v %.2f  w %.2f", data.cmd_lin, data.cmd_ang);
   y += kLineH2;
+
+  if (data.sonar_enabled) {
+    const bool show_summary =
+        data.sonar_cal_summary_until_ms > now_ms && data.sonar_cal_snap_count >= 3;
+    if (show_summary) {
+      const float left_m = snap_range_near(data, 180.0f);
+      const float right_m = snap_range_near(data, 0.0f);
+      const float fwd_m = snap_range_near(data, 90.0f);
+      g.setTextColor(TFT_YELLOW, TFT_BLACK);
+      g.setCursor(kTextX, y);
+      g.print("L ");
+      print_range_value(g, left_m);
+      g.print("  R ");
+      print_range_value(g, right_m);
+      g.print("  F ");
+      print_range_value(g, fwd_m);
+      y += kLineH2;
+    } else if (data.sonar_cal_active) {
+      g.setTextColor(TFT_YELLOW, TFT_BLACK);
+      g.setCursor(kTextX, y);
+      g.print("SCAN ");
+      print_range_value(g, data.sonar_range_m);
+      g.printf(" @%.0f", data.sonar_pan_deg);
+      y += kLineH2;
+      if (data.sonar_cal_snap_count > 0) {
+        g.setTextSize(1);
+        g.setTextColor(TFT_CYAN, TFT_BLACK);
+        g.setCursor(kTextX, y);
+        g.print("got ");
+        for (uint8_t i = 0; i < data.sonar_cal_snap_count; i++) {
+          if (i > 0) {
+            g.print(" ");
+          }
+          g.printf("%.0f:", data.sonar_cal_snap_pan[i]);
+          print_range_value(g, data.sonar_cal_snap_range[i]);
+        }
+        y += 12;
+        g.setTextSize(2);
+      }
+    } else {
+      uint16_t rng_col = TFT_CYAN;
+      if (data.sonar_range_m > 0.01f) {
+        if (data.sonar_range_m < 0.15f) {
+          rng_col = TFT_RED;
+        } else if (data.sonar_range_m < 0.30f) {
+          rng_col = TFT_YELLOW;
+        }
+      } else {
+        rng_col = TFT_DARKGREY;
+      }
+      g.setTextColor(rng_col, TFT_BLACK);
+      g.setCursor(kTextX, y);
+      g.print("Pan ");
+      g.printf("%3.0f  ", data.sonar_pan_deg);
+      print_range_value(g, data.sonar_range_m);
+      y += kLineH2;
+    }
+  }
 
   if (data.stall || data.bump) {
     g.setTextColor(TFT_YELLOW, TFT_BLACK);
@@ -353,6 +458,7 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
 
   if (data.ir_enabled) {
     g.setTextSize(1);
+#if defined(ROVER_UI_IR_DEBUG)
     if (!data.ir_ok) {
       g.setTextColor(TFT_RED, TFT_BLACK);
       g.setCursor(kTextX, y);
@@ -409,6 +515,20 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
                  data.ir_front_gpio);
       }
     }
+#else
+    if (!data.ir_ok) {
+      g.setTextColor(TFT_RED, TFT_BLACK);
+      g.setCursor(kTextX, y);
+      g.printf("IR fault f:%s b:%s", data.ir_in_ok ? "OK" : "--",
+               data.ir_out_ok ? "OK" : "--");
+      y += 12;
+    } else if (data.ir_front_hit) {
+      g.setTextColor(TFT_YELLOW, TFT_BLACK);
+      g.setCursor(kTextX, y);
+      g.print("IR bumper HIT");
+      y += 12;
+    }
+#endif
     g.setTextSize(2);
   }
 }
@@ -563,7 +683,12 @@ bool RoverDisplay::_changed(const RoverUiData &data) const {
   if (data.link_state != _last.link_state) return true;
   if (data.ota_state != _last.ota_state) return true;
   if (data.bat_low != _last.bat_low || data.bat_critical != _last.bat_critical) return true;
-  if (!feq(data.bat_v, _last.bat_v)) return true;
+  // Screen shows 1 decimal (0.1V). feq()'s 5mV tolerance is far finer than
+  // that, so raw ADC noise was tripping this on almost every loop, forcing a
+  // full SPI sprite redraw ~every 100ms and blocking the whole control loop
+  // (including the sonar pan servo update) for tens of ms each time — that
+  // was the real cause of the "jerky" pan sweep, not the PCA9685 or I2C.
+  if (fabsf(data.bat_v - _last.bat_v) >= 0.05f) return true;
   if (!feq(data.cmd_lin, _last.cmd_lin) || !feq(data.cmd_ang, _last.cmd_ang)) return true;
   if (!feq(data.motor_l, _last.motor_l) || !feq(data.motor_r, _last.motor_r)) return true;
   if (data.ir_enabled != _last.ir_enabled || data.ir_ok != _last.ir_ok) return true;
@@ -586,6 +711,31 @@ bool RoverDisplay::_changed(const RoverUiData &data) const {
     if (data.ir_i2c_addrs[i] != _last.ir_i2c_addrs[i]) return true;
   }
   if (data.ir_sda_pin != _last.ir_sda_pin || data.ir_scl_pin != _last.ir_scl_pin) return true;
+  if (data.sonar_enabled != _last.sonar_enabled) return true;
+  if (data.sonar_cal_active != _last.sonar_cal_active) return true;
+  if (fabsf(data.sonar_pan_deg - _last.sonar_pan_deg) >= 2.0f) return true;
+  if (fabsf(data.sonar_range_m - _last.sonar_range_m) >= 0.02f) return true;
+#if defined(ROVER_VL53L)
+  if (data.tof_left_ok != _last.tof_left_ok || data.tof_right_ok != _last.tof_right_ok) return true;
+#else
+  if (data.tof_enabled != _last.tof_enabled) return true;
+#endif
+  if (fabsf(data.tof_left_m - _last.tof_left_m) >= 0.01f) return true;
+  if (fabsf(data.tof_right_m - _last.tof_right_m) >= 0.01f) return true;
+  if (data.sonar_cal_snap_count != _last.sonar_cal_snap_count) return true;
+  if (data.sonar_cal_summary_until_ms > 0 &&
+      (data.sonar_cal_summary_until_ms > 0) != (_last.sonar_cal_summary_until_ms > 0)) {
+    return true;
+  }
+  for (uint8_t i = 0; i < data.sonar_cal_snap_count && i < 4; i++) {
+    if (fabsf(data.sonar_cal_snap_range[i] - _last.sonar_cal_snap_range[i]) >= 0.02f) {
+      return true;
+    }
+  }
+  if (data.boot_reason_until_ms > 0 &&
+      ((data.boot_reason_until_ms > 0) != (_last.boot_reason_until_ms > 0))) {
+    return true;
+  }
   const char *mode = data.mode ? data.mode : "?";
   return strncmp(mode, _last_mode, sizeof(_last_mode)) != 0;
 }
@@ -621,26 +771,10 @@ bool RoverDisplay::begin() {
 void RoverDisplay::draw(const RoverUiData &data, uint32_t now_ms) {
   if (!_ok || !_sprite_ok) return;
 
-  const bool face_blink =
-      !data.mode_menu &&
-      (face_for(data) == FaceExpr::kHappy || face_for(data) == FaceExpr::kBoot ||
-       face_for(data) == FaceExpr::kWait || face_for(data) == FaceExpr::kExploreWait) &&
-      ((now_ms % 3500) < 120);
-  const bool menu_hint_active = data.menu_hint_until_ms > now_ms;
-  const bool menu_active = data.mode_menu || data.power_menu;
-  const bool key_flash_active = data.key_flash_until_ms > now_ms;
-  const bool tap_active = data.tap_progress > 0;
-  const bool ir_active = data.ir_enabled &&
-                         (data.ir_front_hit || data.ir_front_emit || !data.ir_ok);
-  const uint32_t min_interval =
-      (menu_active || menu_hint_active || key_flash_active || tap_active || ir_active)
-          ? 40
-          : (face_blink ? 80 : 100);
-
-  if (now_ms - _last_draw < min_interval) return;
-  if (!_changed(data) && !face_blink && !menu_active && !menu_hint_active && !key_flash_active &&
-      !tap_active)
-    return;
+#ifndef ROVER_DISPLAY_MIN_MS
+#define ROVER_DISPLAY_MIN_MS 1000
+#endif
+  if (now_ms - _last_draw < ROVER_DISPLAY_MIN_MS) return;
   _last_draw = now_ms;
 
   render_frame(sprite, data, now_ms);

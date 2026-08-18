@@ -14,6 +14,7 @@ constexpr uint8_t kLed0OnL = 0x06;
 }  // namespace
 
 bool RoverPca9685::writeReg(uint8_t reg, uint8_t val) {
+  RoverI2cGuard guard;
   rover_i2c_touch();
   Wire.beginTransmission(_addr);
   Wire.write(reg);
@@ -28,6 +29,7 @@ bool RoverPca9685::writeReg(uint8_t reg, uint8_t val) {
 // this I2C bus every loop tick — tears the ON/OFF pair apart and produces one
 // bad PWM cycle: a visible servo jump, not a hardware fault.
 bool RoverPca9685::writeReg4(uint8_t reg, uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3) {
+  RoverI2cGuard guard;
   rover_i2c_touch();
   Wire.beginTransmission(_addr);
   Wire.write(reg);
@@ -39,6 +41,7 @@ bool RoverPca9685::writeReg4(uint8_t reg, uint8_t b0, uint8_t b1, uint8_t b2, ui
 }
 
 bool RoverPca9685::readReg(uint8_t reg, uint8_t &val) const {
+  RoverI2cGuard guard;
   rover_i2c_touch();
   Wire.beginTransmission(_addr);
   Wire.write(reg);

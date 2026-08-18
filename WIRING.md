@@ -24,8 +24,8 @@ Board: [T-Display-S3](https://github.com/Xinyuan-LilyGO/T-Display-S3)
 | **14** | Go / start-stop button (KEY, top-right) |
 | **15** | Board power on (`PIN_POWER_ON`) |
 | **16** | Battery ADC (2S divider tap) |
-| **17** | UART RX ← Pi TX |
-| **18** | UART TX → Pi RX |
+| **17** | Left VL53L1X XSHUT (ex-Pi UART RX) |
+| **18** | Right VL53L1X XSHUT (ex-Pi UART TX) |
 | **21** | IR chase beacon TX (38 kHz, for mini-bot TSOP) |
 | **38** | LCD backlight |
 | **43** | I2C SDA (MPU6050 + MCP23008 + PCA9685) |
@@ -90,6 +90,26 @@ One daisy-chained bus — **3.3 V only**, **4.7 kΩ** pull-ups on SDA/SCL once p
 | MCP23008 “front” | **0x20** | Front bumper IR (ribbon PCB) |
 | MCP23008 “body” | **0x21** | Aux + wheel IR |
 | PCA9685 | **0x40** | Pan sonar servo **ch 15**, aux head servo **ch 0** |
+| VL53L1X left | **0x30** | Side ToF — XSHUT → GPIO **17** |
+| VL53L1X right | **0x31** | Side ToF — XSHUT → GPIO **18** |
+
+### VL53L1X side ToF (hallway wall-follow)
+
+Two **VL53L1X** breakouts on the same bus as MPU/MCP/PCA. Default address is **0x29** on both — firmware toggles **XSHUT** on **GPIO 17/18** (ex-Pi UART header) to assign **0x30** (left) and **0x31** (right) at boot.
+
+| Breakout | Connect |
+|----------|---------|
+| VCC | 3.3 V |
+| GND | GND |
+| SDA | GPIO **43** |
+| SCL | GPIO **44** |
+| XSHUT left | GPIO **17** (100 Ω series from old Pi link is fine) |
+| XSHUT right | GPIO **18** (100 Ω series from old Pi link is fine) |
+| GPIO1 (interrupt) | leave unconnected |
+
+**One sensor only:** wire XSHUT to GPIO **17** (left) or **18** (right); the other init fails harmlessly. Set `HALLWAY_WALL=left` or `right` on dockerhost.
+
+Mount left/right pointing sideways (~90° from forward). Brain: `ROVER_MODE=hallway`, tap **Go** — holds **10 cm** (`HALLWAY_TARGET_M=0.10`).
 
 ### MPU6050
 

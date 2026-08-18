@@ -1,6 +1,9 @@
 #include <Arduino.h>
+#include <esp_system.h>
 #include <micro_ros_platformio.h>
 #include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
@@ -21,6 +24,7 @@
 #include "mpu.h"
 #include "rover_board_power.h"
 #include "status_led.h"
+#include "rover_diag.h"
 
 #ifdef ROVER_TDISPLAY_S3
 #include "battery.h"
@@ -38,6 +42,9 @@
 #if defined(ROVER_SONAR)
 #include "rover_sonar.h"
 #include "ultrasonic.h"
+#endif
+#if defined(ROVER_VL53L)
+#include "rover_vl53.h"
 #endif
 #endif
 
@@ -71,6 +78,9 @@ static rcl_node_t node;
 static rcl_subscription_t sub;
 static rcl_subscription_t session_sub;
 static rcl_subscription_t heartbeat_sub;
+#if defined(ROVER_SONAR)
+static rcl_subscription_t sonar_cal_sweep_sub;
+#endif
 static rcl_publisher_t imu_pub;
 static rcl_publisher_t bump_pub;
 static rcl_publisher_t stall_pub;
@@ -90,6 +100,10 @@ static rcl_publisher_t sonar_escape_event_pub;
 static rcl_publisher_t sonar_escape_turn_pub;
 static rcl_publisher_t sonar_escape_best_deg_pub;
 static rcl_publisher_t sonar_escape_best_m_pub;
+#if defined(ROVER_VL53L)
+static rcl_publisher_t tof_left_pub;
+static rcl_publisher_t tof_right_pub;
+#endif
 static rcl_subscription_t ir_aux_sample_sub;
 static rcl_subscription_t servo_angle_sub;
 static rclc_executor_t executor;
@@ -115,8 +129,15 @@ static std_msgs__msg__UInt8 sonar_escape_event_msg;
 static std_msgs__msg__Float32 sonar_escape_turn_msg;
 static std_msgs__msg__Float32 sonar_escape_best_deg_msg;
 static std_msgs__msg__Float32 sonar_escape_best_m_msg;
+#if defined(ROVER_VL53L)
+static sensor_msgs__msg__Range tof_left_msg;
+static sensor_msgs__msg__Range tof_right_msg;
+#endif
 static std_msgs__msg__Bool session_msg;
 static std_msgs__msg__UInt32 heartbeat_msg;
+#if defined(ROVER_SONAR)
+static std_msgs__msg__Bool sonar_cal_sweep_msg;
+#endif
 
 static SmoothDrive drv;
 static Mpu6050 mpu;
@@ -161,16 +182,110 @@ static IrTx ir_beacon;
 #if defined(ROVER_SONAR)
 static Ultrasonic sonar;
 static RoverSonar rover_sonar;
+static TaskHandle_t pan_task_handle = nullptr;
 #endif
+#if defined(ROVER_VL53L)
+static RoverVl53 side_tof;
+#endif
+#endif
+
+#ifdef ROVER_TDISPLAY_S3
+static char boot_reason_buf[24] = {};
+static uint32_t boot_reason_until_ms = 0;
 #endif
 
 static float last_lin = 0, last_ang = 0;
 static uint32_t last_drive_ms = 0;
+static float last_heading_trim = 0.0f;
+static float last_imu_yaw_deg = 0.0f;
+static float last_imu_gz_dps = 0.0f;
+static float last_imu_az_g = 0.0f;
+static bool imu_rest_logged = false;
 #if defined(ROVER_SONAR)
 static bool sonar_drive_override = false;
 static float sonar_drive_lin = 0.0f;
 static float sonar_drive_ang = 0.0f;
+static bool session_cal_sweep_triggered = false;
+static bool sonar_scan_hold_logged = false;
+static uint32_t sonar_cal_summary_until_ms = 0;
+static bool sonar_cal_was_active = false;
+static bool go_cal_sweep_pending = false;
+
+static bool explore_motion_armed() {
+  return pi_session_sub_value || go_cal_sweep_pending ||
+         (millis() - last_drive_ms < 1500);
+}
+
+static bool sonar_scan_hold() {
+  return explore_motion_armed() && rover_sonar.cal_sweep_active();
+}
+
+static void update_session_cal_sweep(uint32_t now_ms) {
+  const bool cal_active = rover_sonar.cal_sweep_active();
+  if (sonar_cal_was_active && !cal_active) {
+    sonar_cal_summary_until_ms = now_ms + 30000;
+    go_cal_sweep_pending = false;
+    rover_diag_ckpt(kCkptCalDone, rover_sonar.cal_snap_count());
+    rover_diag_event("cal_done snaps=%u", rover_sonar.cal_snap_count());
+  }
+  sonar_cal_was_active = cal_active;
+
+  if (!explore_motion_armed()) {
+    session_cal_sweep_triggered = false;
+    sonar_scan_hold_logged = false;
+    sonar_cal_summary_until_ms = 0;
+    sonar_cal_was_active = false;
+    go_cal_sweep_pending = false;
+    rover_sonar.set_pan_scan_enabled(false);
+    return;
+  }
+  rover_sonar.set_pan_scan_enabled(!sonar_scan_hold());
+  if (!session_cal_sweep_triggered && !rover_sonar.cal_sweep_active()) {
+    if (go_cal_sweep_pending) {
+      rover_sonar.set_cal_sweep(true);
+      session_cal_sweep_triggered = true;
+      go_cal_sweep_pending = false;
+      rover_diag_event("cal_start");
+    }
+  }
+  if (sonar_scan_hold()) {
+    if (!sonar_scan_hold_logged) {
+      sonar_scan_hold_logged = true;
+      rover_diag_event("cal_hold motors=off");
+    }
+  } else if (sonar_scan_hold_logged) {
+    sonar_scan_hold_logged = false;
+    rover_diag_event("cal_hold motors=on");
+  }
+}
 #endif
+
+static const char *reset_reason_str(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:
+      return "power-on";
+    case ESP_RST_EXT:
+      return "external";
+    case ESP_RST_SW:
+      return "software";
+    case ESP_RST_PANIC:
+      return "panic";
+    case ESP_RST_INT_WDT:
+      return "int_wdt";
+    case ESP_RST_TASK_WDT:
+      return "task_wdt";
+    case ESP_RST_WDT:
+      return "wdt";
+    case ESP_RST_DEEPSLEEP:
+      return "deepsleep";
+    case ESP_RST_BROWNOUT:
+      return "brownout";
+    case ESP_RST_SDIO:
+      return "sdio";
+    default:
+      return "unknown";
+  }
+}
 
 enum class RosState { kWaitAgent, kConnect, kConnected, kDisconnect };
 
@@ -215,26 +330,27 @@ void on_servo_angle(const void *msgin) {
 
 void on_session(const void *msgin) {
   const auto *m = static_cast<const std_msgs__msg__Bool *>(msgin);
+  const bool prev = pi_session_sub_value;
   pi_session_sub_value = m->data;
   last_pi_traffic_ms = millis();
   bridge_live_latched = true;
+  if (prev != pi_session_sub_value) {
+    rover_diag_event("session %s", pi_session_sub_value ? "on" : "off");
+  }
 }
 
-void on_heartbeat(const void *msgin) {
-  const auto *m = static_cast<const std_msgs__msg__UInt32 *>(msgin);
-  const bool active = (m->data & 0x80000000U) != 0;
-  static bool last_bit = false;
-  static uint8_t agree = 0;
+#if defined(ROVER_TDISPLAY_S3) && defined(ROVER_SONAR)
+void on_sonar_cal_sweep(const void *msgin) {
+  const auto *m = static_cast<const std_msgs__msg__Bool *>(msgin);
+  rover_sonar.set_cal_sweep(m->data);
+}
+#endif
 
-  if (active == last_bit) {
-    if (agree < 3) agree++;
-  } else {
-    last_bit = active;
-    agree = 1;
-  }
-  if (agree >= 2) {
-    pi_session_sub_value = active;
-  }
+void on_heartbeat(const void *msgin) {
+  (void)msgin;
+  // Session state comes only from /rover/session — do NOT mirror the
+  // heartbeat driving bit into pi_session_sub_value (that cleared session
+  // whenever the rover slowed/stopped and killed pan scan + UI explore mode).
   last_pi_traffic_ms = millis();
   bridge_live_latched = true;
 }
@@ -563,6 +679,17 @@ static bool create_entities() {
   RCCHECK(rclc_publisher_init_default(
     &sonar_escape_best_m_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/sonar/escape_best_m"));
+  RCCHECK(rclc_subscription_init_default(
+    &sonar_cal_sweep_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+    "rover/sonar/cal_sweep"));
+#endif
+#if defined(ROVER_VL53L)
+  RCCHECK(rclc_publisher_init_default(
+    &tof_left_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
+    "rover/tof/left"));
+  RCCHECK(rclc_publisher_init_default(
+    &tof_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
+    "rover/tof/right"));
 #endif
 #ifdef ROVER_TDISPLAY_S3
   RCCHECK(rclc_subscription_init_default(
@@ -574,11 +701,16 @@ static bool create_entities() {
   RCCHECK(rclc_subscription_init_default(
     &heartbeat_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
     "rover/heartbeat"));
-  RCCHECK(rclc_executor_init(&executor, &support.context, 6, &allocator));
+  RCCHECK(rclc_executor_init(&executor, &support.context, 7, &allocator));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &heartbeat_sub, &heartbeat_msg, &on_heartbeat, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &session_sub, &session_msg, &on_session, ON_NEW_DATA));
+#if defined(ROVER_SONAR)
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &sonar_cal_sweep_sub, &sonar_cal_sweep_msg, &on_sonar_cal_sweep,
+    ON_NEW_DATA));
+#endif
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
   RCCHECK(rclc_executor_add_subscription(
     &executor, &ir_aux_sample_sub, &ir_aux_sample_msg, &on_ir_aux_sample, ON_NEW_DATA));
@@ -614,6 +746,14 @@ static bool create_entities() {
   sonar_escape_turn_msg.data = 0.0f;
   sonar_escape_best_deg_msg.data = static_cast<float>(SONAR_PAN_CENTER_DEG);
   sonar_escape_best_m_msg.data = 0.0f;
+#endif
+#if defined(ROVER_VL53L)
+  tof_left_msg.range = std::numeric_limits<float>::quiet_NaN();
+  tof_left_msg.min_range = 0.02f;
+  tof_left_msg.max_range = 1.3f;
+  tof_left_msg.field_of_view = 0.47f;
+  tof_left_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
+  tof_right_msg = tof_left_msg;
 #endif
   session_msg.data = false;
   pi_session_sub_value = false;
@@ -652,6 +792,11 @@ static void destroy_entities() {
   RCSOFTCHECK(rcl_publisher_fini(&sonar_escape_turn_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&sonar_escape_best_deg_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&sonar_escape_best_m_pub, &node));
+  RCSOFTCHECK(rcl_subscription_fini(&sonar_cal_sweep_sub, &node));
+#endif
+#if defined(ROVER_VL53L)
+  RCSOFTCHECK(rcl_publisher_fini(&tof_left_pub, &node));
+  RCSOFTCHECK(rcl_publisher_fini(&tof_right_pub, &node));
 #endif
 #ifdef ROVER_TDISPLAY_S3
   RCSOFTCHECK(rcl_subscription_fini(&servo_angle_sub, &node));
@@ -686,6 +831,13 @@ static void apply_drive(float yaw_rate, float dt) {
     force_stop(nullptr);
     return;
   }
+
+#if defined(ROVER_SONAR)
+  if (sonar_scan_hold()) {
+    drv.set_target(0.0f, 0.0f);
+    return;
+  }
+#endif
 
 #if defined(ROVER_SONAR)
   float v = sonar_drive_lin;
@@ -727,6 +879,7 @@ static void apply_drive(float yaw_rate, float dt) {
   } else {
     heading.disarm();
   }
+  last_heading_trim = trim;
 
   float l, r;
 
@@ -771,6 +924,9 @@ void on_cmd(const void *msgin) {
   if (drive_blocked()) {
     return;
   }
+  if (!pi_session_sub_value) {
+    return;
+  }
   const auto *msg = (const geometry_msgs__msg__Twist *)msgin;
 #ifndef CMD_VEL_CROSS_FIX
 #define CMD_VEL_CROSS_FIX 1
@@ -802,6 +958,10 @@ static void handle_ros_state() {
         ros_state = RosState::kConnected;
         ros_connected_at_ms = millis();
         Serial.println("micro-ROS ready");
+#if defined(ROVER_VL53L)
+        rover_diag_event("vl53_link L=%s R=%s", side_tof.left_ok() ? "OK" : "--",
+                         side_tof.right_ok() ? "OK" : "--");
+#endif
 #ifdef ROVER_TDISPLAY_S3
         publish_drive_mode();
 #endif
@@ -864,30 +1024,51 @@ static void update_status_led(uint32_t now_ms) {
 static void calibrate_gyro() {
   if (!mpu.ok()) return;
   Serial.println("MPU gyro cal — hold rover still...");
-  float sum_gz = 0;
+  heading.begin();
   float sum_ax = 0, sum_ay = 0, sum_az = 0;
   int n = 0;
-  for (int i = 0; i < 200; i++) {
+  uint32_t prev_ms = millis();
+  const uint32_t t0 = prev_ms;
+  while (millis() - t0 < 2800) {
     float ax, ay, az, gx, gy, gz;
+    const uint32_t now = millis();
+    float dt = (now - prev_ms) / 1000.0f;
+    prev_ms = now;
+    if (dt < 0.001f) {
+      dt = 0.001f;
+    }
     if (mpu.read(ax, ay, az, gx, gy, gz)) {
-      sum_gz += imu_yaw_rate(gx, gy, gz);
+      heading.update(imu_yaw_rate(gx, gy, gz), dt, true);
       sum_ax += ax;
       sum_ay += ay;
       sum_az += az;
       n++;
     }
-    status_led.tick(millis());
+    status_led.tick(now);
     delay(5);
   }
   if (n > 0) {
-    const float bias = sum_gz / (float)n;
-    heading.calibrate_bias(bias);
-    heading.reset_angle();
-    Serial.printf("Gyro bias=%.4f rad/s\n", bias);
+    Serial.printf("Gyro bias=%.4f rad/s ready=%d\n", heading.bias_rad_s(),
+                  heading.ready() ? 1 : 0);
     Serial.printf("MPU at rest: ax=%.2f ay=%.2f az=%.2f g  ", sum_ax / n, sum_ay / n,
                   sum_az / n);
     Serial.println("(flat + Z-up: |az|~1g; spin CW from above: yaw rate should go negative)");
+    rover_diag_event("imu_cal bias=%.4f ready=%d", heading.bias_rad_s(), heading.ready() ? 1 : 0);
   }
+}
+
+static bool imu_stationary() {
+  constexpr uint32_t CMD_IDLE_MS = 400;
+  if (millis() - last_drive_ms < CMD_IDLE_MS) {
+    return false;
+  }
+  if (fabsf(drv.cur_left()) > 0.04f || fabsf(drv.cur_right()) > 0.04f) {
+    return false;
+  }
+  if (fabsf(drv.tgt_left()) > 0.04f || fabsf(drv.tgt_right()) > 0.04f) {
+    return false;
+  }
+  return true;
 }
 
 void setup() {
@@ -899,6 +1080,14 @@ void setup() {
   Serial.setTxTimeoutMs(0);
 #endif
   delay(500);
+  rover_diag_begin(reset_reason_str(esp_reset_reason()));
+  Serial.printf("Reset reason: %s (%d)\n", reset_reason_str(esp_reset_reason()),
+                static_cast<int>(esp_reset_reason()));
+#ifdef ROVER_TDISPLAY_S3
+  snprintf(boot_reason_buf, sizeof(boot_reason_buf), "RST:%s",
+           reset_reason_str(esp_reset_reason()));
+  boot_reason_until_ms = millis() + 15000;
+#endif
 
 #if !defined(ROVER_MICROROS_WIFI)
   PiSerial.begin(PI_UART_BAUD, SERIAL_8N1, PI_UART_RX, PI_UART_TX);
@@ -952,10 +1141,29 @@ void setup() {
 #if defined(ROVER_SONAR)
   if (sonar.begin(SONAR_TRIG_PIN, SONAR_ECHO_PIN)) {
     rover_sonar.begin(&sonar, pca9685.ok() ? &pca9685 : nullptr);
+    rover_sonar.boot_full_sweep();
     Serial.printf("Sonar OK TRIG=%d ECHO=%d pan ch %d\n", SONAR_TRIG_PIN, SONAR_ECHO_PIN,
                   (int)ROVER_SERVO_CHANNEL);
+    // The pan sweep gets its own task on the other core, on a fixed
+    // schedule, so it never inherits the main loop's TFT/WiFi/ROS jitter
+    // (measured at 10-150+ ms per iteration). Arduino's loopTask runs on
+    // core 1, so pin this to core 0.
+    xTaskCreatePinnedToCore(
+        [](void*) {
+          for (;;) {
+            rover_sonar.update_pan_wiggle(millis());
+            vTaskDelay(pdMS_TO_TICKS(20));
+          }
+        },
+        "pan_wiggle", 3072, nullptr, 1, &pan_task_handle, 0);
+    rover_diag_set_pan_task(pan_task_handle);
   } else {
     Serial.println("WARN: sonar init failed");
+  }
+#endif
+#if defined(ROVER_VL53L)
+  if (!side_tof.begin(VL53L_XSHUT_L, VL53L_XSHUT_R)) {
+    Serial.println("WARN: VL53L1X init failed (check SDA/SCL, XSHUT 17/18, chip=L1X not L0X)");
   }
 #endif
 #endif
@@ -1007,6 +1215,7 @@ void setup() {
   WiFi.setSleep(WIFI_PS_NONE);
   Serial.printf("WiFi -> server agent %s:%d  ESP IP=%s\n", ROVER_AGENT_IP, ROVER_AGENT_PORT,
                 WiFi.localIP().toString().c_str());
+  rover_diag_wifi_ready();
 #ifdef ROVER_TDISPLAY_S3
   ota.beginConnected("rover-esp");
 #endif
@@ -1068,9 +1277,25 @@ void loop() {
   const bool imu_ok = mpu.ok() && mpu.read(ax, ay, az, gx, gy, gz);
   const float yaw_rate = imu_ok ? imu_yaw_rate(gx, gy, gz) : 0.0f;
   if (imu_ok) {
-    heading.integrate_gyro(yaw_rate, dt);
+    heading.update(yaw_rate, dt, imu_stationary());
+    last_imu_yaw_deg = heading.angle_deg_wrapped();
+    last_imu_gz_dps = heading.rate_dps();
+    last_imu_az_g = az;
+    if (!imu_rest_logged && heading.ready() && imu_stationary()) {
+      imu_rest_logged = true;
+      rover_diag_event("mpu_rest ax=%.2f ay=%.2f az=%.2f bias=%.4f gz=%.2f", ax, ay, az,
+                       heading.bias_rad_s(), heading.rate_dps());
+    }
   }
-  const float yaw_deg = imu_ok ? heading.angle_deg() : 0.0f;
+  const float yaw_deg = imu_ok ? heading.angle_deg_wrapped() : 0.0f;
+
+#if defined(ROVER_VL53L)
+  static uint32_t last_tof_poll = 0;
+  if (side_tof.ok() && now - last_tof_poll >= 100) {
+    last_tof_poll = now;
+    side_tof.poll();
+  }
+#endif
 
   if (ros_state == RosState::kConnected) {
 #if defined(ROVER_SONAR)
@@ -1079,6 +1304,10 @@ void loop() {
       const bool cmd_fresh = (now - last_drive_ms) <= CMD_TIMEOUT_MS;
       float s_lin = cmd_fresh ? last_lin : 0.0f;
       float s_ang = cmd_fresh ? last_ang : 0.0f;
+      if (sonar_scan_hold()) {
+        s_lin = 0.0f;
+        s_ang = 0.0f;
+      }
       const bool body_moving =
           fabsf(drv.cur_left()) > 0.04f || fabsf(drv.cur_right()) > 0.04f;
       sonar_drive_override =
@@ -1129,6 +1358,29 @@ void loop() {
     }
 #endif
 
+#if defined(ROVER_VL53L)
+    static uint32_t last_tof_pub = 0;
+    if (side_tof.ok() && now - last_tof_pub >= 100) {
+      last_tof_pub = now;
+      const int32_t sec = static_cast<int32_t>(now / 1000);
+      const uint32_t nsec = static_cast<uint32_t>((now % 1000) * 1000000UL);
+      if (side_tof.left_ok()) {
+        const float rng = side_tof.range_left_m();
+        tof_left_msg.range = (rng > 0.0f) ? rng : std::numeric_limits<float>::quiet_NaN();
+        tof_left_msg.header.stamp.sec = sec;
+        tof_left_msg.header.stamp.nanosec = nsec;
+        RCSOFTCHECK(rcl_publish(&tof_left_pub, &tof_left_msg, NULL));
+      }
+      if (side_tof.right_ok()) {
+        const float rng = side_tof.range_right_m();
+        tof_right_msg.range = (rng > 0.0f) ? rng : std::numeric_limits<float>::quiet_NaN();
+        tof_right_msg.header.stamp.sec = sec;
+        tof_right_msg.header.stamp.nanosec = nsec;
+        RCSOFTCHECK(rcl_publish(&tof_right_pub, &tof_right_msg, NULL));
+      }
+    }
+#endif
+
 #ifdef ROVER_TDISPLAY_S3
     const bool rover_active =
         pi_session_sub_value || (millis() - last_drive_ms < 1000);
@@ -1153,7 +1405,7 @@ void loop() {
       imu_msg.linear_acceleration.z = az * 9.80665f;
       imu_msg.angular_velocity.x = gx;
       imu_msg.angular_velocity.y = gy;
-      imu_msg.angular_velocity.z = yaw_rate;
+      imu_msg.angular_velocity.z = heading.rate_rad_s();
       RCSOFTCHECK(rcl_publish(&imu_pub, &imu_msg, NULL));
 
       const float motor_l = fmaxf(fabsf(drv.tgt_left()), fabsf(drv.cur_left()));
@@ -1196,6 +1448,25 @@ void loop() {
   if (ros_state == RosState::kConnected) {
     drv.tick();
   }
+
+#if defined(ROVER_SONAR)
+  {
+    static uint8_t last_snap_count = 0;
+    const uint8_t snaps = rover_sonar.cal_snap_count();
+    if (snaps > last_snap_count) {
+      const uint8_t i = snaps - 1;
+      rover_diag_event("cal_snap pan=%.0f rng=%.2f", rover_sonar.cal_snap_pan(i),
+                       rover_sonar.cal_snap_range(i));
+      last_snap_count = snaps;
+    } else if (snaps < last_snap_count) {
+      last_snap_count = snaps;
+    }
+  }
+#endif
+
+#if defined(ROVER_SONAR)
+  update_session_cal_sweep(now);
+#endif
 
   update_status_led(now);
 
@@ -1248,6 +1519,32 @@ void loop() {
     ui.ir_i2c_addrs[i] = (i < ir_i2c_scan.count) ? ir_i2c_scan.addrs[i] : 0;
   }
 #endif
+#if defined(ROVER_SONAR)
+  ui.sonar_enabled = true;
+  ui.sonar_pan_deg = rover_sonar.pan_deg();
+  ui.sonar_range_m = rover_sonar.range_m();
+  ui.sonar_cal_active = rover_sonar.cal_sweep_active();
+  ui.sonar_cal_snap_count = rover_sonar.cal_snap_count();
+  for (uint8_t i = 0; i < 4; i++) {
+    if (i < ui.sonar_cal_snap_count) {
+      ui.sonar_cal_snap_pan[i] = rover_sonar.cal_snap_pan(i);
+      ui.sonar_cal_snap_range[i] = rover_sonar.cal_snap_range(i);
+    } else {
+      ui.sonar_cal_snap_pan[i] = 0.0f;
+      ui.sonar_cal_snap_range[i] = -1.0f;
+    }
+  }
+  ui.sonar_cal_summary_until_ms = sonar_cal_summary_until_ms;
+#endif
+#if defined(ROVER_VL53L)
+  ui.tof_enabled = true;
+  ui.tof_left_ok = side_tof.left_ok();
+  ui.tof_right_ok = side_tof.right_ok();
+  ui.tof_left_m = side_tof.range_left_m();
+  ui.tof_right_m = side_tof.range_right_m();
+#endif
+  ui.boot_reason = boot_reason_buf[0] ? boot_reason_buf : nullptr;
+  ui.boot_reason_until_ms = boot_reason_until_ms;
   if (estop.active()) {
     ui.mode = "E-STOP";
   } else if (battery.critical()) {
@@ -1259,6 +1556,10 @@ void loop() {
       ui.mode = "Mode menu";
     } else if (!ui.session_active) {
       ui.mode = "Standby";
+    } else if (ui.sonar_cal_active) {
+      ui.mode = "SONAR SCAN";
+    } else if (ui.sonar_cal_summary_until_ms > now) {
+      ui.mode = "SCAN DONE";
     } else {
       constexpr uint32_t CMD_TIMEOUT_MS = 400;
       if (millis() - last_drive_ms > CMD_TIMEOUT_MS) {
@@ -1271,6 +1572,41 @@ void loop() {
     ui.mode = "idle";
   }
   display.draw(ui, now);
+
+#if defined(ROVER_SONAR) || defined(ROVER_VL53L)
+  {
+    RoverDiagSample diag{};
+    diag.now_ms = now;
+    diag.link_state = link_state_code();
+    diag.session = pi_session_sub_value;
+#if defined(ROVER_SONAR)
+    diag.cal_active = rover_sonar.cal_sweep_active();
+    diag.cal_step = rover_sonar.cal_step();
+    diag.cal_snaps = rover_sonar.cal_snap_count();
+    diag.pan_deg = rover_sonar.pan_deg();
+    diag.range_m = rover_sonar.range_m();
+#else
+    diag.cal_active = false;
+    diag.pan_deg = 90.0f;
+    diag.range_m = -1.0f;
+#endif
+    diag.cmd_lin = last_lin;
+    diag.cmd_ang = last_ang;
+    diag.motor_l = drv.cur_left();
+    diag.motor_r = drv.cur_right();
+    diag.bat_v = battery.voltage();
+    diag.yaw_deg = last_imu_yaw_deg;
+    diag.gz_dps = last_imu_gz_dps;
+    diag.htrim = last_heading_trim;
+    diag.az_g = last_imu_az_g;
+#if defined(ROVER_VL53L)
+    diag.tof_l_m = side_tof.left_ok() ? side_tof.range_left_m() : -1.0f;
+    diag.tof_r_m = side_tof.right_ok() ? side_tof.range_right_m() : -1.0f;
+#endif
+    rover_diag_tick(diag);
+  }
+#endif
+
   ui.bump = false;
   ui.stall = false;
 
