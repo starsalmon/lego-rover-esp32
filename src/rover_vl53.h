@@ -2,10 +2,12 @@
 
 #include <stdint.h>
 
-/** Dual VL53L0X/L1X side rangefinders on shared I2C (XSHUT on GPIO 17/18). */
+class RoverMcpIr;
+
+/** Dual VL53L0X/L1X side rangefinders on shared I2C (XSHUT on body MCP GPA6/GPA7). */
 class RoverVl53 {
  public:
-  bool begin(int xshut_left, int xshut_right);
+  bool begin(RoverMcpIr* mcp);
   void poll();
 
   bool ok() const { return _ok; }
@@ -15,13 +17,12 @@ class RoverVl53 {
   float range_right_m() const { return _right_m; }
 
  private:
-  void set_xshut(int pin, bool on);
+  void set_xshut(bool left_on, bool right_on);
 
+  RoverMcpIr* _mcp = nullptr;
   bool _ok = false;
   bool _left_ok = false;
   bool _right_ok = false;
-  int _xshut_l = -1;
-  int _xshut_r = -1;
   float _left_m = -1.0f;
   float _right_m = -1.0f;
 };

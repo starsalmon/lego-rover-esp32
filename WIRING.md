@@ -2,7 +2,7 @@
 
 **Source of truth:** `include/rover_pins_s3.h` (T-Display-S3) or C3 headers if you swap boards.
 
-**Production rover:** LilyGO **T-Display-S3** + optional Pi Zero 2W (**speaker + LED ring only**).
+**Production rover:** LilyGO **T-Display-S3** — speaker + ring on ESP GPIO **17/18**; brain on dockerhost.
 
 ---
 
@@ -24,8 +24,8 @@ Board: [T-Display-S3](https://github.com/Xinyuan-LilyGO/T-Display-S3)
 | **14** | Go / start-stop button (KEY, top-right) |
 | **15** | Board power on (`PIN_POWER_ON`) |
 | **16** | Battery ADC (2S divider tap) |
-| **17** | Left VL53L1X XSHUT (ex-Pi UART RX) |
-| **18** | Right VL53L1X XSHUT (ex-Pi UART TX) |
+| **17** | Passive buzzer / piezo (+) |
+| **18** | WS2812 ring DIN (8 LEDs) |
 | **21** | IR chase beacon TX (38 kHz, for mini-bot TSOP) |
 | **38** | LCD backlight |
 | **43** | I2C SDA (MPU6050 + MCP23008 + PCA9685) |
@@ -64,19 +64,16 @@ PWM **15 kHz** — better low-end torque on this driver/motors than 20 kHz (may 
 
 ---
 
-## T-Display-S3 ↔ Raspberry Pi (UART — peripherals only)
+## T-Display-S3 ↔ Raspberry Pi (UART — legacy)
 
-**115200** 8N1 — framed commands for buzzer + WS2812 ring (`pi_peripheral_daemon.py`).
+**Deprecated** for production — brain is on dockerhost; speaker + ring are on the ESP (GPIO **17** / **18**).
 
-| Pi header | Pi BCM | T-Display |
-|-----------|--------|-----------|
-| Pin 8 TX | GPIO **14** | → **IO17** (ESP RX) |
-| Pin 10 RX | GPIO **15** | ← **IO18** (ESP TX) |
-| GND | GND | GND |
+| Pi header | Pi BCM | T-Display (old) |
+|-----------|--------|-----------------|
+| Pin 8 TX | GPIO **14** | → **IO17** |
+| Pin 10 RX | GPIO **15** | ← **IO18** |
 
-Install: `bash ~/lego-rover-ros2/install_pi_peripheral.sh` — see `../lego-rover-ros2/PI_PERIPHERAL.md`.
-
-**Legacy:** micro-ROS @ 460800 used `rover-agent.service` + `s3_tdisplay_microros_rover_legacy` firmware.
+Only needed if you still run `pi_peripheral_daemon.py` on a Pi.
 
 ---
 
@@ -90,12 +87,12 @@ One daisy-chained bus — **3.3 V only**, **4.7 kΩ** pull-ups on SDA/SCL once p
 | MCP23008 “front” | **0x20** | Front bumper IR (ribbon PCB) |
 | MCP23008 “body” | **0x21** | Aux + wheel IR |
 | PCA9685 | **0x40** | Pan sonar servo **ch 15**, aux head servo **ch 0** |
-| VL53L1X left | **0x30** | Side ToF — XSHUT → GPIO **17** |
-| VL53L1X right | **0x31** | Side ToF — XSHUT → GPIO **18** |
+| VL53L1X left | **0x30** | Side ToF — XSHUT → body MCP **GPA6** |
+| VL53L1X right | **0x31** | Side ToF — XSHUT → body MCP **GPA7** |
 
 ### VL53L1X side ToF (hallway wall-follow)
 
-Two **VL53L1X** breakouts on the same bus as MPU/MCP/PCA. Default address is **0x29** on both — firmware toggles **XSHUT** on **GPIO 17/18** (ex-Pi UART header) to assign **0x30** (left) and **0x31** (right) at boot.
+Two **VL53L1X** breakouts on the same bus as MPU/MCP/PCA. Default address is **0x29** on both — firmware toggles **XSHUT** on body MCP **GPA6/GPA7** to assign **0x30** (left) and **0x31** (right) at boot.
 
 | Breakout | Connect |
 |----------|---------|
@@ -103,11 +100,11 @@ Two **VL53L1X** breakouts on the same bus as MPU/MCP/PCA. Default address is **0
 | GND | GND |
 | SDA | GPIO **43** |
 | SCL | GPIO **44** |
-| XSHUT left | GPIO **17** (100 Ω series from old Pi link is fine) |
-| XSHUT right | GPIO **18** (100 Ω series from old Pi link is fine) |
+| XSHUT left | Body MCP **GPA6** (pin 6 on @0x21) |
+| XSHUT right | Body MCP **GPA7** (pin 7 on @0x21) |
 | GPIO1 (interrupt) | leave unconnected |
 
-**One sensor only:** wire XSHUT to GPIO **17** (left) or **18** (right); the other init fails harmlessly. Set `HALLWAY_WALL=left` or `right` on dockerhost.
+**One sensor only:** wire XSHUT to **GPA6** (left) or **GPA7** (right); the other init fails harmlessly. Set `HALLWAY_WALL=left` or `right` on dockerhost.
 
 Mount left/right pointing sideways (~90° from forward). Brain: `ROVER_MODE=hallway`, tap **Go** — holds **10 cm** (`HALLWAY_TARGET_M=0.10`).
 
@@ -141,6 +138,8 @@ Heading hold uses **gyro Z**. Boot log `MPU at rest: …` — **|az| ≈ 1g** if
 | **3** | out | Aux emitter (GPIO pulse) |
 | **4** | out | Wheel left emitter |
 | **5** | out | Wheel right emitter |
+| **6** | out | Left VL53L XSHUT (HIGH = on) |
+| **7** | out | Right VL53L XSHUT (HIGH = on) |
 
 Pi uses `ROVER_IR_SOURCE=esp` — no Pi GPIO for IR.
 
@@ -193,11 +192,25 @@ Mount: servo horn centres the bracket at **90°**; firmware sweeps full **0° / 
 | `SONAR_SERVO_CHANNEL` | 15 | PCA channel |
 | `SONAR_PAN_MIN_DEG` / `MAX` | 0 / 180 | Full sweep endpoints |
 | `SONAR_PAN_CENTER_DEG` | 90 | Centre (forward) |
-| `SONAR_BOOT_PAN_MS` | 280 | Boot left/right/center dwell (fast as servo allows) |
+| `ROVER_BOOT_PAN_SWEEP` | 0 | Boot pan left/right sweep (1 = bench; 0 = quiet center only) |
+| `SONAR_BOOT_PAN_MS` | 280 | Boot left/right/center dwell when sweep enabled |
 
 Boot sequence (when `ROVER_BOOT_SPIN_TRICK=1`): **pan left (180°) → right (0°) → centre**, then IMU **left 360° + right 360°** at 10% (`ROVER_BOOT_SPIN_LIN`).
 
 If the boot pan sweep looks reversed, set `SONAR_PAN_INVERT=1` in `platformio.ini` and reflash.
+
+---
+
+## Speaker + LED ring (GPIO 17 / 18)
+
+| Device | ESP GPIO | Notes |
+|--------|----------|--------|
+| Passive buzzer **+** | **17** (P1 header) | PWM tones — **−** to GND |
+| WS2812 ring **DIN** | **18** (P1 header) | 330 Ω series if you have one |
+| Ring **VCC** | **5 V** | Same rail as Pi used (pin 2/4) |
+| Ring **GND** | GND | Common with ESP |
+
+Firmware: `ROVER_PERIPH=1` in `s3_tdisplay_microros*`. Cues: ready tune on agent connect, session start/stop, bump/stall flashes, sonar distance colour map during pan scans.
 
 ---
 

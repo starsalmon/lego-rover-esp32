@@ -50,6 +50,8 @@ class RoverSonar {
   /** When enabled (explore / bench cal), run the cruise pan wiggle.
    *  When disabled (standby idle), hold center — independent of wheel motion. */
   void set_pan_scan_enabled(bool enabled);
+  /** Pause cruise wiggle near obstacles — hold pan at center. */
+  bool hold_pan_wiggle() const;
 
   /** Drives the smooth sine cruise-wiggle. Called from a dedicated
    *  FreeRTOS task on its own fixed schedule, NOT from the main loop —
@@ -64,6 +66,9 @@ class RoverSonar {
   void push_range_sample(float range_m);
   bool closing_trend() const;
   void note_glance_sample(float pan_deg, float range_m);
+  float effective_forward_m() const;
+  /** Conservative forward range for braking — ignores off-center "open" glances. */
+  float brake_range_m() const;
 
   Ultrasonic* _sonar = nullptr;
   RoverPca9685* _pca = nullptr;

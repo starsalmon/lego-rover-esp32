@@ -36,15 +36,24 @@
 #define MPU_SCL 44
 #endif
 
-// Legacy Pi UART header (IO17/IO18) — repurposed for VL53L1X XSHUT when Pi is removed.
-#ifndef VL53L_XSHUT_L
-#define VL53L_XSHUT_L 17  // was PI_UART_RX
+// Speaker + WS2812 ring (ex-Pi UART header wires — see WIRING.md).
+#ifndef PIN_ROVER_SPEAKER
+#define PIN_ROVER_SPEAKER 17
 #endif
-#ifndef VL53L_XSHUT_R
-#define VL53L_XSHUT_R 18  // was PI_UART_TX
+#ifndef PIN_ROVER_RING
+#define PIN_ROVER_RING 18
+#endif
+#ifndef ROVER_RING_COUNT
+#define ROVER_RING_COUNT 8
+#endif
+#ifndef ROVER_RING_BRIGHTNESS
+#define ROVER_RING_BRIGHTNESS 24
+#endif
+#ifndef ROVER_RING_ZERO_BEARING
+#define ROVER_RING_ZERO_BEARING 270.0f
 #endif
 
-// Pi UART (legacy — unused on WiFi micro-ROS rover; pins may be VL53L XSHUT).
+// Pi UART (legacy serial micro-ROS only — not used on WiFi rover).
 #ifndef PI_UART_PORT
 #define PI_UART_PORT 1
 #define PI_UART_RX 17
@@ -88,6 +97,8 @@
 #define BODY_OUT_AUX 3     // GPA3 → aux IR gate (OUTPUT, BC557 PNP, MCP low = on)
 #define BODY_OUT_WHEEL_L 4 // GPA4 → wheel left emitter (OUTPUT, BC557 PNP)
 #define BODY_OUT_WHEEL_R 5 // GPA5 → wheel right emitter (OUTPUT, BC557 PNP)
+#define BODY_OUT_VL53_L 6  // GPA6 → left VL53L XSHUT (push-pull, HIGH = on)
+#define BODY_OUT_VL53_R 7  // GPA7 → right VL53L XSHUT
 #endif
 
 // Legacy aliases (old dual-chip in/out @ same GPA index on 0x20/0x21)
@@ -117,10 +128,14 @@
 #endif
 
 #ifndef SONAR_GLANCE_MAG_DEG
-#define SONAR_GLANCE_MAG_DEG 22.0f
+#define SONAR_GLANCE_MAG_DEG 18.0f
 #endif
 #ifndef SONAR_GLANCE_PERIOD_MS
-#define SONAR_GLANCE_PERIOD_MS 2800
+#define SONAR_GLANCE_PERIOD_MS 3200
+#endif
+#ifndef SONAR_WIGGLE_HOLD_M
+// Hold pan at center (no wiggle) when forward range below this.
+#define SONAR_WIGGLE_HOLD_M 0.42f
 #endif
 #ifndef SONAR_FORWARD_READ_MS
 #define SONAR_FORWARD_READ_MS 200
@@ -171,11 +186,25 @@
 // 0 = normal mount. Set 1 only if horn is reversed on the spline (not a bracket flip).
 #define SONAR_PAN_INVERT 0
 #endif
+// Sonar on pan bracket — distance from sensor face to front bumper (m).
+#ifndef SONAR_TO_BUMPER_M
+#define SONAR_TO_BUMPER_M 0.09f
+#endif
 #ifndef SONAR_AVOID_M
-#define SONAR_AVOID_M 0.55f
+// Slow / trend threshold (sonar reading, not bumper distance).
+#define SONAR_AVOID_M 0.38f
 #endif
 #ifndef SONAR_STOP_M
-#define SONAR_STOP_M 0.20f
+// Hard stop forward (sonar reading). ~15 cm to bumper with 9 cm offset.
+#define SONAR_STOP_M 0.24f
+#endif
+#ifndef SONAR_SPIN_STOP_M
+// Zero angular when this close while driving (prevents wall-hugging spin).
+#define SONAR_SPIN_STOP_M 0.30f
+#endif
+#ifndef SONAR_CLOSE_ANY_M
+// Any pan angle — treat as emergency forward stop.
+#define SONAR_CLOSE_ANY_M 0.20f
 #endif
 #ifndef SONAR_REVERSE_M
 #define SONAR_REVERSE_M 0.08f
@@ -208,6 +237,14 @@
 #ifndef STALL_TICKS_REQUIRED
 #define STALL_TICKS_REQUIRED 1
 #endif
+#ifndef STALL_EXPECTED_TICKS_CRUISE
+// Wheel IR ticks in STALL_TICK_WINDOW at ROVER_CRUISE_MAX_LIN on hard floor.
+#define STALL_EXPECTED_TICKS_CRUISE 10
+#endif
+#ifndef STALL_SLIP_RATIO
+// Stall when tick rate falls below this fraction of motor-scaled expectation.
+#define STALL_SLIP_RATIO 0.12f
+#endif
 #ifndef STALL_TICK_WINDOW_CRUISE_MS
 #define STALL_TICK_WINDOW_CRUISE_MS 1500
 #endif
@@ -216,6 +253,20 @@
 #endif
 #ifndef STALL_COOLDOWN_MS
 #define STALL_COOLDOWN_MS 2000
+#endif
+
+// IMU horizontal jerk bump (g) while motors are engaged.
+#ifndef BUMP_JERK_G
+#define BUMP_JERK_G 0.38f
+#endif
+#ifndef BUMP_COOLDOWN_MS
+#define BUMP_COOLDOWN_MS 1200
+#endif
+#ifndef BUMP_LP_ALPHA
+#define BUMP_LP_ALPHA 0.86f
+#endif
+#ifndef BUMP_GYRO_MAX
+#define BUMP_GYRO_MAX 2.2f
 #endif
 #ifndef WHEEL_STALL_MOTOR
 #define WHEEL_STALL_MOTOR 0.08f
@@ -230,7 +281,8 @@
 #define ROVER_BOOT_SPIN_TRICK 0
 #endif
 #ifndef ROVER_BOOT_PAN_SWEEP
-#define ROVER_BOOT_PAN_SWEEP 1
+// 1 = full left/right/center sweep at boot (bench). 0 = quiet center only.
+#define ROVER_BOOT_PAN_SWEEP 0
 #endif
 #ifndef ROVER_TELEM_HOST
 #define ROVER_TELEM_HOST "192.168.2.31"
@@ -246,7 +298,7 @@
 #define PCA9685_ADDR 0x40
 #endif
 
-// VL53L1X side ToF — XSHUT on GPIO 17/18 (ex-Pi UART header). Shared I2C 43/44.
+// VL53L1X side ToF — XSHUT on body MCP GPA6/GPA7. Shared I2C 43/44.
 #ifndef VL53L_ADDR_L
 #define VL53L_ADDR_L 0x30
 #endif

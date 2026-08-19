@@ -11,6 +11,7 @@ class MotionDetect {
   void update(float ax, float ay, float az, float gx, float gy, float gz, float motor_l,
               float motor_r, uint32_t wheel_l_ticks, uint32_t wheel_r_ticks, uint32_t now_ms);
   bool stall() const { return _stall; }
+  bool bump() const { return _bump; }
   void clear_events();
 
  private:
@@ -18,6 +19,7 @@ class MotionDetect {
 
   uint32_t _drive_since = 0;
   uint32_t _last_stall_ms = 0;
+  uint32_t _last_bump_ms = 0;
   uint32_t _wheel_ref_ticks = 0;
   uint32_t _wheel_ref_ms = 0;
   uint32_t _last_ms = 0;
@@ -25,6 +27,7 @@ class MotionDetect {
   float _lp_ay = 0.0f;
   float _lp_az = 1.0f;
   bool _stall = false;
+  bool _bump = false;
 
   static constexpr float STALL_MOTOR = 0.04f;
 };

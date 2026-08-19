@@ -13,21 +13,27 @@ constexpr uint8_t kRegGpio = 0x09;
 
 // Front @ 0x20: GPA0-1 in, GPA2-3 out (BC547 gates), GPA4-7 spare inputs.
 constexpr uint8_t kFrontIodir = 0xF3;
-// Body @ 0x21 — GPA0-2 Schmitt INPUTS, GPA3-5 BC557 emitter OUTPUTS.
-// MCP IODIR: 1=input. Only clear bits 3-5 in IODIR (outputs); 0-2,6-7 stay input.
+// Body @ 0x21 — GPA0-2 Schmitt INPUTS, GPA3-5 BC557 emitter OUTPUTS, GPA6-7 VL53 XSHUT.
+// MCP IODIR: 1=input. GPA3-7 are outputs; GPA0-2 stay input.
 constexpr uint8_t kBodySchmittInMask =
     static_cast<uint8_t>((1u << BODY_IN_AUX) | (1u << BODY_IN_WHEEL_L) |
                          (1u << BODY_IN_WHEEL_R));
 constexpr uint8_t kBodyEmitterOutMask =
     static_cast<uint8_t>((1u << BODY_OUT_AUX) | (1u << BODY_OUT_WHEEL_L) |
                          (1u << BODY_OUT_WHEEL_R));
+constexpr uint8_t kBodyVl53OutMask =
+    static_cast<uint8_t>((1u << BODY_OUT_VL53_L) | (1u << BODY_OUT_VL53_R));
+constexpr uint8_t kBodyAllOutMask =
+    static_cast<uint8_t>(kBodyEmitterOutMask | kBodyVl53OutMask);
 constexpr uint8_t kBodyIodir =
-    static_cast<uint8_t>(0xFFu & static_cast<uint8_t>(~kBodyEmitterOutMask));
+    static_cast<uint8_t>(0xFFu & static_cast<uint8_t>(~kBodyAllOutMask));
 static_assert(BODY_IN_AUX == 0 && BODY_IN_WHEEL_L == 1 && BODY_IN_WHEEL_R == 2);
 static_assert(BODY_OUT_AUX == 3 && BODY_OUT_WHEEL_L == 4 && BODY_OUT_WHEEL_R == 5);
+static_assert(BODY_OUT_VL53_L == 6 && BODY_OUT_VL53_R == 7);
 static_assert(kBodySchmittInMask == 0x07, "GPA0-2 inputs");
-static_assert(kBodyEmitterOutMask == 0x38, "GPA3-5 outputs");
-static_assert(kBodyIodir == 0xC7, "IODIR: in 0-2,6-7 out 3-5");
+static_assert(kBodyEmitterOutMask == 0x38, "GPA3-5 PNP emitter outputs");
+static_assert(kBodyVl53OutMask == 0xC0, "GPA6-7 VL53 XSHUT outputs");
+static_assert(kBodyIodir == 0x07, "IODIR: in 0-2, out 3-7");
 
 }  // namespace
 
@@ -116,7 +122,7 @@ bool RoverMcpIr::beginFront() {
 bool RoverMcpIr::beginBody() {
   if (!_body.ok()) {
     if (!_body.begin(MCP_BODY_ADDR)) return false;
-    // Emitters off (GPA3-5 high); never latch-low GPA0-2 Schmitt inputs.
+    // Emitters off (GPA3-5 high); VL53 XSHUT low; never latch-low GPA0-2 Schmitt inputs.
     _body_out_shadow =
         static_cast<uint8_t>(kBodyPnpLowMask | kBodySchmittInMask);  // 0x3F
     if (!_body.configureIo(kBodyIodir, _body_out_shadow)) return false;
@@ -355,6 +361,21 @@ bool RoverMcpIr::rear_obstacle() {
   bool on_hit = false;
   sample_aux(MCP_IR_AUX_OFF_MS, MCP_IR_AUX_ON_MS, off_hit, on_hit);
   return on_hit && !off_hit;
+}
+
+void RoverMcpIr::set_vl53_xshut(bool left_on, bool right_on) {
+  if (!_body.ok()) return;
+  if (left_on) {
+    _body_out_shadow |= static_cast<uint8_t>(1u << BODY_OUT_VL53_L);
+  } else {
+    _body_out_shadow &= static_cast<uint8_t>(~(1u << BODY_OUT_VL53_L));
+  }
+  if (right_on) {
+    _body_out_shadow |= static_cast<uint8_t>(1u << BODY_OUT_VL53_R);
+  } else {
+    _body_out_shadow &= static_cast<uint8_t>(~(1u << BODY_OUT_VL53_R));
+  }
+  applyBodyOutputs();
 }
 
 void RoverMcpIr::sample_aux(uint16_t off_ms, uint16_t on_ms, bool &off_hit, bool &on_hit) {

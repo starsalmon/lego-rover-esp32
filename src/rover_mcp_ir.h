@@ -78,6 +78,9 @@ class RoverMcpIr {
   void sample_aux(uint16_t off_ms, uint16_t on_ms, bool &off_hit, bool &on_hit);
   void sample_front(uint16_t off_ms, uint16_t on_ms, bool &off_hit, bool &on_hit);
 
+  /** VL53L XSHUT on body MCP GPA6/GPA7 — direct push-pull (HIGH = sensor on). */
+  void set_vl53_xshut(bool left_on, bool right_on);
+
   bool front_off_hit() const { return _front_hit_l || _front_hit_r; }
   bool front_on_hit() const { return _front_hit_l || _front_hit_r; }
 

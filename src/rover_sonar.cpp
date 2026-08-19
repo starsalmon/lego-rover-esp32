@@ -239,7 +239,50 @@ void RoverSonar::note_glance_sample(float pan_deg, float range_m) {
     _glance_left_m = range_m;
   } else if (pan_deg >= center + SONAR_GLANCE_MAG_DEG * 0.5f) {
     _glance_right_m = range_m;
+  } else {
+    _last_forward_range_m = range_m;
+    push_range_sample(range_m);
   }
+}
+
+float RoverSonar::effective_forward_m() const {
+  float best = _last_forward_range_m;
+  if (_glance_left_m > 0.0f) {
+    best = (best > 0.0f) ? fminf(best, _glance_left_m) : _glance_left_m;
+  }
+  if (_glance_right_m > 0.0f) {
+    best = (best > 0.0f) ? fminf(best, _glance_right_m) : _glance_right_m;
+  }
+  if (_last_range_m > 0.0f) {
+    best = (best > 0.0f) ? fminf(best, _last_range_m) : _last_range_m;
+  }
+  return best;
+}
+
+float RoverSonar::brake_range_m() const {
+  // Only trust live center cone for clearance; a glance into open space must not
+  // release the forward brake while the nose still faces the wall.
+  float r = _last_forward_range_m;
+  const float center = center_pan();
+  const bool at_center = fabsf(_pan_deg - center) <= SONAR_GLANCE_MAG_DEG * 0.40f;
+  if (at_center && _last_range_m > 0.0f) {
+    r = (r > 0.0f) ? fminf(r, _last_range_m) : _last_range_m;
+  }
+  if (_glance_left_m > 0.0f) {
+    r = (r > 0.0f) ? fminf(r, _glance_left_m) : _glance_left_m;
+  }
+  if (_glance_right_m > 0.0f) {
+    r = (r > 0.0f) ? fminf(r, _glance_right_m) : _glance_right_m;
+  }
+  return r;
+}
+
+bool RoverSonar::hold_pan_wiggle() const {
+  if (_braking) {
+    return true;
+  }
+  const float r = brake_range_m();
+  return r > 0.0f && r < SONAR_WIGGLE_HOLD_M;
 }
 
 void RoverSonar::boot_full_sweep() {
@@ -270,11 +313,6 @@ bool RoverSonar::tick(uint32_t now_ms, float cmd_lin, float cmd_ang, bool body_m
     if (rng > 0.0f) {
       _last_range_m = rng;
       note_glance_sample(_pan_deg, rng);
-      const float center = center_pan();
-      if (fabsf(_pan_deg - center) <= SONAR_GLANCE_MAG_DEG * 0.45f) {
-        _last_forward_range_m = rng;
-        push_range_sample(rng);
-      }
     }
   }
   if (_cal_capture_pending) {
@@ -288,7 +326,9 @@ bool RoverSonar::tick(uint32_t now_ms, float cmd_lin, float cmd_ang, bool body_m
   }
 
   const bool forward = cmd_lin > 0.04f;
+  const bool turning = fabsf(cmd_ang) > 0.03f;
   _braking = false;
+  // Center-forward reading only — same as pre-wander-tune firmware.
   const float fwd_rng = _last_forward_range_m;
   if (forward && fwd_rng > 0.0f) {
     if (fwd_rng < SONAR_STOP_M || (closing_trend() && fwd_rng < SONAR_AVOID_M)) {
@@ -304,6 +344,11 @@ bool RoverSonar::tick(uint32_t now_ms, float cmd_lin, float cmd_ang, bool body_m
 
   *out_lin = cmd_lin;
   *out_ang = cmd_ang;
+  if (turning && forward && fwd_rng > 0.0f && fwd_rng < SONAR_SPIN_STOP_M) {
+    // Creep forward while steering — never spin in place against a wall.
+    *out_lin = fmaxf(cmd_lin, 0.08f);
+    return true;
+  }
   return false;
 }
 

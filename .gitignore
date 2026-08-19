@@ -8,3 +8,4 @@ platformio_private.ini
 .cursor/
 compile_commands.json
 *.d
+.DS_Store

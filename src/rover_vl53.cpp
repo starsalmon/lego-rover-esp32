@@ -7,6 +7,7 @@
 
 #include "rover_diag.h"
 #include "rover_i2c.h"
+#include "rover_mcp_ir.h"
 #include "rover_pins_s3.h"
 
 #ifndef VL53L_ADDR_L
@@ -128,20 +129,18 @@ static bool try_single_l0x(bool* out_ok) {
   return *out_ok;
 }
 
-static bool begin_chip_l1x(int xshut_l, int xshut_r, bool* left_ok, bool* right_ok) {
+static bool begin_chip_l1x(RoverMcpIr* mcp, bool* left_ok, bool* right_ok) {
   *left_ok = false;
   *right_ok = false;
 
-  if (xshut_l >= 0) {
-    digitalWrite(xshut_l, HIGH);
+  if (mcp) {
+    mcp->set_vl53_xshut(true, false);
     delay(20);
     {
       RoverI2cGuard guard;
       *left_ok = setup_one_l1x(g_l1_left, VL53L_ADDR_L);
     }
-  }
-  if (xshut_r >= 0) {
-    digitalWrite(xshut_r, HIGH);
+    mcp->set_vl53_xshut(true, true);
     delay(20);
     {
       RoverI2cGuard guard;
@@ -157,20 +156,18 @@ static bool begin_chip_l1x(int xshut_l, int xshut_r, bool* left_ok, bool* right_
   return *left_ok || *right_ok;
 }
 
-static bool begin_chip_l0x(int xshut_l, int xshut_r, bool* left_ok, bool* right_ok) {
+static bool begin_chip_l0x(RoverMcpIr* mcp, bool* left_ok, bool* right_ok) {
   *left_ok = false;
   *right_ok = false;
 
-  if (xshut_l >= 0) {
-    digitalWrite(xshut_l, HIGH);
+  if (mcp) {
+    mcp->set_vl53_xshut(true, false);
     delay(20);
     {
       RoverI2cGuard guard;
       *left_ok = setup_one_l0x(g_l0_left, VL53L_ADDR_L);
     }
-  }
-  if (xshut_r >= 0) {
-    digitalWrite(xshut_r, HIGH);
+    mcp->set_vl53_xshut(true, true);
     delay(20);
     {
       RoverI2cGuard guard;
@@ -186,31 +183,22 @@ static bool begin_chip_l0x(int xshut_l, int xshut_r, bool* left_ok, bool* right_
   return *left_ok || *right_ok;
 }
 
-void RoverVl53::set_xshut(int pin, bool on) {
-  if (pin < 0) {
-    return;
+void RoverVl53::set_xshut(bool left_on, bool right_on) {
+  if (_mcp) {
+    _mcp->set_vl53_xshut(left_on, right_on);
   }
-  digitalWrite(pin, on ? HIGH : LOW);
 }
 
-bool RoverVl53::begin(int xshut_left, int xshut_right) {
+bool RoverVl53::begin(RoverMcpIr* mcp) {
   g_chip = Vl53Chip::kNone;
   _ok = false;
   _left_ok = false;
   _right_ok = false;
-  _xshut_l = xshut_left;
-  _xshut_r = xshut_right;
+  _mcp = mcp;
   _left_m = -1.0f;
   _right_m = -1.0f;
 
-  if (_xshut_l >= 0) {
-    pinMode(_xshut_l, OUTPUT);
-  }
-  if (_xshut_r >= 0) {
-    pinMode(_xshut_r, OUTPUT);
-  }
-  set_xshut(_xshut_l, false);
-  set_xshut(_xshut_r, false);
+  set_xshut(false, false);
   delay(20);
 
   bool p29 = false;
@@ -223,24 +211,27 @@ bool RoverVl53::begin(int xshut_left, int xshut_right) {
                   p30 ? "yes" : "no", p31 ? "yes" : "no");
   }
 
-  if (begin_chip_l1x(_xshut_l, _xshut_r, &_left_ok, &_right_ok)) {
+  if (begin_chip_l1x(_mcp, &_left_ok, &_right_ok)) {
     g_chip = Vl53Chip::kL1x;
   } else {
-    set_xshut(_xshut_l, false);
-    set_xshut(_xshut_r, false);
+    set_xshut(false, false);
     delay(20);
-    if (begin_chip_l0x(_xshut_l, _xshut_r, &_left_ok, &_right_ok)) {
+    if (begin_chip_l0x(_mcp, &_left_ok, &_right_ok)) {
       g_chip = Vl53Chip::kL0x;
       Serial.println("VL53: using VL53L0X driver (L1X init failed)");
     }
   }
 
+  if (_left_ok || _right_ok) {
+    set_xshut(_left_ok, _right_ok);
+  }
+
   _ok = g_chip != Vl53Chip::kNone;
   const char* chip =
       g_chip == Vl53Chip::kL1x ? "L1X" : (g_chip == Vl53Chip::kL0x ? "L0X" : "none");
-  Serial.printf("VL53 %s left=%s right=%s xshut GPIO %d/%d (addr 0x%02x/0x%02x)\n", chip,
-                _left_ok ? "OK" : "--", _right_ok ? "OK" : "--", _xshut_l, _xshut_r, VL53L_ADDR_L,
-                VL53L_ADDR_R);
+  Serial.printf("VL53 %s left=%s right=%s xshut MCP GPA%d/%d (addr 0x%02x/0x%02x)\n", chip,
+                _left_ok ? "OK" : "--", _right_ok ? "OK" : "--", BODY_OUT_VL53_L, BODY_OUT_VL53_R,
+                VL53L_ADDR_L, VL53L_ADDR_R);
   {
     RoverI2cGuard guard;
     rover_diag_event("vl53 %s L=%s R=%s i2c29=%d", chip, _left_ok ? "OK" : "--",

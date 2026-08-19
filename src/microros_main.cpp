@@ -46,6 +46,9 @@
 #if defined(ROVER_VL53L)
 #include "rover_vl53.h"
 #endif
+#if defined(ROVER_PERIPH)
+#include "rover_periph.h"
+#endif
 #endif
 
 #ifndef DIR_L
@@ -187,6 +190,10 @@ static TaskHandle_t pan_task_handle = nullptr;
 #if defined(ROVER_VL53L)
 static RoverVl53 side_tof;
 #endif
+#if defined(ROVER_PERIPH)
+static RoverPeriph rover_periph;
+static bool periph_ready_played = false;
+#endif
 #endif
 
 #ifdef ROVER_TDISPLAY_S3
@@ -239,7 +246,7 @@ static void update_session_cal_sweep(uint32_t now_ms) {
     rover_sonar.set_pan_scan_enabled(false);
     return;
   }
-  rover_sonar.set_pan_scan_enabled(!sonar_scan_hold());
+  rover_sonar.set_pan_scan_enabled(!sonar_scan_hold() && !rover_sonar.hold_pan_wiggle());
   if (!session_cal_sweep_triggered && !rover_sonar.cal_sweep_active()) {
     if (go_cal_sweep_pending) {
       rover_sonar.set_cal_sweep(true);
@@ -336,6 +343,9 @@ void on_session(const void *msgin) {
   bridge_live_latched = true;
   if (prev != pi_session_sub_value) {
     rover_diag_event("session %s", pi_session_sub_value ? "on" : "off");
+#if defined(ROVER_PERIPH)
+    rover_periph.notify_session(pi_session_sub_value);
+#endif
   }
 }
 
@@ -442,6 +452,7 @@ static void handle_go_button_event(RoverButtonEvent ev, uint32_t now_ms) {
     power_menu_open = true;
     mode_menu_open = false;
     selected_power_action = kPowerShutdown;
+    rover_periph.play(RoverPeriph::kMelodyMenu);
     publish_button_event(kBtnGoTriple);
     Serial.println("EVENT power menu open");
     return;
@@ -459,8 +470,10 @@ static void handle_go_button_event(RoverButtonEvent ev, uint32_t now_ms) {
     power_menu_open = false;
     publish_button_event(kBtnGoLong);
     if (mode_menu_open) {
+      rover_periph.play(RoverPeriph::kMelodyMenu);
       publish_drive_mode();
     } else {
+      rover_periph.play(RoverPeriph::kMelodyMenuDone);
       menu_saved_flash_until = millis() + 6000;
     }
     return;
@@ -469,15 +482,18 @@ static void handle_go_button_event(RoverButtonEvent ev, uint32_t now_ms) {
   if (ev == kBtnGoShort) {
     if (power_menu_open) {
       cycle_power_action();
+      rover_periph.play(RoverPeriph::kMelodyButton);
       return;
     }
     if (mode_menu_open && !pi_session_sub_value) {
       cycle_drive_mode();
+      rover_periph.play(RoverPeriph::kMelodyButton);
       return;
     }
     power_menu_open = false;
     mode_menu_open = false;
     menu_saved_flash_until = 0;
+    rover_periph.play(RoverPeriph::kMelodyButton);
     if (ros_state == RosState::kConnected) {
       button_msg.data = true;
       RCSOFTCHECK(rcl_publish(&button_pub, &button_msg, NULL));
@@ -506,6 +522,28 @@ static void force_stop(const char *reason) {
   if (reason) {
     Serial.printf("DRIVE STOP: %s\n", reason);
   }
+}
+
+static uint32_t bump_event_cooldown_until = 0;
+
+static void publish_bump_event(const char* source) {
+  const uint32_t now = millis();
+  if (now < bump_event_cooldown_until) {
+    return;
+  }
+  bump_event_cooldown_until = now + BUMP_COOLDOWN_MS;
+
+  if (ros_state == RosState::kConnected) {
+    bump_msg.data = true;
+    RCSOFTCHECK(rcl_publish(&bump_pub, &bump_msg, NULL));
+  }
+#if defined(ROVER_PERIPH)
+  rover_periph.notify_bump();
+#endif
+#ifdef ROVER_TDISPLAY_S3
+  ui.bump = true;
+#endif
+  Serial.printf("EVENT bump — %s\n", source ? source : "?");
 }
 
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
@@ -537,6 +575,14 @@ static void poll_mcp_ir(uint32_t now) {
   mcp_ir.tick(now);
 
   const bool front = mcp_ir.front_hit();
+  const bool rover_moving =
+      pi_session_sub_value || (now - last_drive_ms < 1000);
+  static bool last_front_bumper = false;
+  if (mcp_ir.front_ok() && rover_moving && front && !last_front_bumper) {
+    publish_bump_event("front IR bumper");
+  }
+  last_front_bumper = front;
+
 #if defined(ROVER_DISABLE_FRONT_IR)
   (void)front;
   const bool front_for_ros = false;
@@ -958,6 +1004,12 @@ static void handle_ros_state() {
         ros_state = RosState::kConnected;
         ros_connected_at_ms = millis();
         Serial.println("micro-ROS ready");
+#if defined(ROVER_PERIPH)
+        if (!periph_ready_played) {
+          periph_ready_played = true;
+          rover_periph.notify_ready();
+        }
+#endif
 #if defined(ROVER_VL53L)
         rover_diag_event("vl53_link L=%s R=%s", side_tof.left_ok() ? "OK" : "--",
                          side_tof.right_ok() ? "OK" : "--");
@@ -1141,7 +1193,9 @@ void setup() {
 #if defined(ROVER_SONAR)
   if (sonar.begin(SONAR_TRIG_PIN, SONAR_ECHO_PIN)) {
     rover_sonar.begin(&sonar, pca9685.ok() ? &pca9685 : nullptr);
+#if ROVER_BOOT_PAN_SWEEP
     rover_sonar.boot_full_sweep();
+#endif
     Serial.printf("Sonar OK TRIG=%d ECHO=%d pan ch %d\n", SONAR_TRIG_PIN, SONAR_ECHO_PIN,
                   (int)ROVER_SERVO_CHANNEL);
     // The pan sweep gets its own task on the other core, on a fixed
@@ -1162,9 +1216,12 @@ void setup() {
   }
 #endif
 #if defined(ROVER_VL53L)
-  if (!side_tof.begin(VL53L_XSHUT_L, VL53L_XSHUT_R)) {
-    Serial.println("WARN: VL53L1X init failed (check SDA/SCL, XSHUT 17/18, chip=L1X not L0X)");
+  if (!side_tof.begin(&mcp_ir)) {
+    Serial.println("WARN: VL53 init failed (check SDA/SCL, MCP GPA6/7 XSHUT, chip=L1X not L0X)");
   }
+#endif
+#if defined(ROVER_PERIPH)
+  rover_periph.begin(PIN_ROVER_SPEAKER, PIN_ROVER_RING);
 #endif
 #endif
 
@@ -1355,6 +1412,9 @@ void loop() {
       RCSOFTCHECK(rcl_publish(&sonar_escape_turn_pub, &sonar_escape_turn_msg, NULL));
       RCSOFTCHECK(rcl_publish(&sonar_escape_best_deg_pub, &sonar_escape_best_deg_msg, NULL));
       RCSOFTCHECK(rcl_publish(&sonar_escape_best_m_pub, &sonar_escape_best_m_msg, NULL));
+#if defined(ROVER_PERIPH)
+      rover_periph.notify_escape();
+#endif
     }
 #endif
 
@@ -1412,6 +1472,9 @@ void loop() {
       const float motor_r = fmaxf(fabsf(drv.tgt_right()), fabsf(drv.cur_right()));
       motion.update(ax, ay, az, gx, gy, gz, motor_l, motor_r,
                     mcp_ir.wheel_left_ticks(), mcp_ir.wheel_right_ticks(), now);
+      if (motion.bump()) {
+        publish_bump_event("IMU jerk");
+      }
       if (motion.stall()) {
         stall_msg.data = true;
         RCSOFTCHECK(rcl_publish(&stall_pub, &stall_msg, NULL));
@@ -1421,6 +1484,9 @@ void loop() {
 #ifdef ROVER_TDISPLAY_S3
         ui.stall = true;
         stall_block_until = now + 2500;
+#if defined(ROVER_PERIPH)
+        rover_periph.notify_stall();
+#endif
 #endif
       }
       motion.clear_events();
@@ -1466,6 +1532,16 @@ void loop() {
 
 #if defined(ROVER_SONAR)
   update_session_cal_sweep(now);
+#endif
+
+#if defined(ROVER_PERIPH)
+  rover_periph.tick(now);
+#if defined(ROVER_SONAR)
+  if (pi_session_sub_value || rover_sonar.cal_sweep_active()) {
+    rover_periph.tick_sonar_map(now, rover_sonar.pan_deg(), rover_sonar.range_m(),
+                                rover_sonar.cal_sweep_active());
+  }
+#endif
 #endif
 
   update_status_led(now);
