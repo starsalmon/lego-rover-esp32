@@ -21,6 +21,7 @@ class RoverSpeaker {
   static constexpr uint8_t kMelodyButton = 7;
   static constexpr uint8_t kMelodyMenu = 8;
   static constexpr uint8_t kMelodyMenuDone = 9;
+  static constexpr uint8_t kMelodySonarPing = 10;
 
  private:
   struct Note {

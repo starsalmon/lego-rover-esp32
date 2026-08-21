@@ -217,7 +217,13 @@ void RoverRing::render(uint32_t now_ms) {
     case kModeSonar:
       for (uint8_t i = 0; i < _count; i++) {
         if (i == _sonar_sweep) {
-          set_pixel(i, 40, 200, 255);
+          // Sweep cursor: turns red when the current ray is "close".
+          const uint8_t d = _sonar_bins[i];
+          if (d < 255 && d <= 28) {  // ~28 cm
+            set_pixel(i, 240, 40, 10);
+          } else {
+            set_pixel(i, 40, 200, 255);
+          }
           continue;
         }
         const uint8_t d = _sonar_bins[i];
@@ -225,10 +231,15 @@ void RoverRing::render(uint32_t now_ms) {
           set_pixel(i, 0, 10, 24);
           continue;
         }
+        // Shared distance colormap (sonar / ToF / IR overlays all use cm bins).
+        // Near = warm orange, far = cool blue. Constant brightness (no distance dimming).
         const float tt = constrain(d / 120.0f, 0.0f, 1.0f);
-        const uint8_t r = static_cast<uint8_t>(255.0f * (1.0f - tt * 0.85f));
-        const uint8_t g = static_cast<uint8_t>(40.0f + 180.0f * tt);
-        const uint8_t b = static_cast<uint8_t>(60.0f + 195.0f * tt);
+        const float h = 0.07f + 0.58f * tt;  // ~orange → ~blue
+        const float v = 0.65f;
+        uint8_t r = 0;
+        uint8_t g = 0;
+        uint8_t b = 0;
+        hsv_color(h, 1.0f, v, r, g, b);
         set_pixel(i, r, g, b);
       }
       break;

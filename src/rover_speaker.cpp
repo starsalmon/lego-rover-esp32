@@ -6,11 +6,11 @@ namespace {
 
 constexpr uint8_t kDutyBits = 8;
 constexpr uint8_t kDutyOn = (1u << kDutyBits) / 3;
-constexpr uint16_t kNoteGapMs = 16;
-constexpr float kVol = 0.36f;
+constexpr uint16_t kNoteGapMs = 8;
+constexpr float kVol = 0.48f;
 
-// Notification cues — ported from lego-roverquest/sound_fx.py (chirp / found / uh_oh)
-// and lego-rover-ros2/rover_speaker.py (button / menu). Short, not songs.
+// Notification cues — “Nokia-ish” bleeps: short, stepwise, slightly moody.
+// Keep these as UI pips, not toy chirps and not single microwave beeps.
 
 struct Note {
   uint16_t hz;
@@ -25,26 +25,46 @@ struct MelodyDef {
 #define NOTE(hz, ms) \
   { static_cast<uint16_t>(hz), static_cast<uint16_t>(ms) }
 
+// Equal temperament (A4 = 440 Hz).
+enum : uint16_t {
+  E3 = 165,
+  F3 = 175,
+  G3 = 196,
+  A3 = 220,
+  C4 = 262,
+  D4 = 294,
+  E4 = 330,
+  F4 = 349,
+  G4 = 392,
+  A4 = 440,
+  C5 = 523,
+  D5 = 587,
+  E5 = 659,
+  G5 = 784,
+};
+
 static const MelodyDef kMelodies[] = {
     {},  // 0 unused
-    // ready — found() @ 70 ms per step
-    {{NOTE(988, 70), NOTE(1319, 70), NOTE(1760, 70)}, 3},
-    // auto start — chirp() @ 50 ms
-    {{NOTE(660, 50), NOTE(880, 50), NOTE(1100, 50)}, 3},
-    // auto stop — uh_oh() @ 80 ms
-    {{NOTE(660, 80), NOTE(520, 80), NOTE(440, 80)}, 3},
-    // bump — low double knock
-    {{NOTE(392, 70), NOTE(392, 70)}, 2},
-    // stall — uh_oh()
-    {{NOTE(660, 80), NOTE(520, 80), NOTE(440, 80)}, 3},
-    // front_ir — quick warning (rover_speaker.py front_ir)
-    {{NOTE(659, 50), NOTE(523, 70)}, 2},
-    // button — single ack (rover_speaker.py button)
-    {{NOTE(659, 30)}, 1},
-    // menu — two-step (rover_speaker.py menu)
-    {{NOTE(523, 28), NOTE(784, 32)}, 2},
-    // menu_done — two-step (rover_speaker.py menu_done)
-    {{NOTE(784, 42), NOTE(523, 32)}, 2},
+    // ready — subtle “connected”
+    {{NOTE(D5, 34), NOTE(E5, 34), NOTE(D5, 34), NOTE(A4, 44)}, 4},
+    // auto start — step up, settle
+    {{NOTE(C5, 30), NOTE(D5, 30), NOTE(E5, 38), NOTE(D5, 36)}, 4},
+    // auto stop — step down, settle
+    {{NOTE(E5, 30), NOTE(D5, 30), NOTE(C5, 40), NOTE(A4, 44)}, 4},
+    // bump — low “thunk thunk”
+    {{NOTE(A3, 55), NOTE(A3, 55), NOTE(E3, 62)}, 3},
+    // stall — lower, longer “stuck”
+    {{NOTE(G3, 62), NOTE(F4, 44), NOTE(D4, 62)}, 3},
+    // front_ir — crisp warning
+    {{NOTE(E5, 28), NOTE(E5, 28), NOTE(C5, 44)}, 3},
+    // button — tiny two-tone pip
+    {{NOTE(C5, 18), NOTE(E5, 22)}, 2},
+    // menu — open pip-pip
+    {{NOTE(C5, 18), NOTE(D5, 20), NOTE(C5, 22)}, 3},
+    // menu_done — confirm pip-pip-down
+    {{NOTE(E5, 18), NOTE(D5, 20), NOTE(C5, 30)}, 3},
+    // sonar_ping — quick “ping” (used during sonar sweep)
+    {{NOTE(G5, 14), NOTE(E5, 18)}, 2},
 };
 
 #undef NOTE

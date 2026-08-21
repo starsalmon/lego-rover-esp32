@@ -306,6 +306,12 @@
 #define VL53L_ADDR_R 0x31
 #endif
 
+// Some builds have the physical left/right VL53 modules (or XSHUT wires) swapped.
+// When set to 1, firmware swaps published /rover/tof/left and /rover/tof/right (and ring overlay).
+#ifndef ROVER_VL53_SWAP_LR
+#define ROVER_VL53_SWAP_LR 0
+#endif
+
 #ifndef STATUS_LED_PIN
 #define STATUS_LED_PIN (-1)
 #endif

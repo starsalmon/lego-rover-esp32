@@ -11,6 +11,8 @@ bool RoverPeriph::begin(int speaker_pin, int ring_pin) {
   const bool ring = _ring.begin(ring_pin);
   for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
     _sonar_bins[i] = 255;
+    _ir_bins[i] = 255;
+    _tof_bins[i] = 255;
   }
   _ring.set_mode(kRingStandby);
   if (spk || ring) {
@@ -75,15 +77,75 @@ uint8_t RoverPeriph::sonar_m_to_cm(float m) {
   return static_cast<uint8_t>(cm);
 }
 
-int RoverPeriph::sonar_pan_to_led(float pan_deg) {
-  const float bearing = fmodf(static_cast<float>(SONAR_PAN_CENTER_DEG) - pan_deg + 360.0f, 360.0f);
+int RoverPeriph::bearing_to_led(float bearing_deg) {
   const float step = 360.0f / static_cast<float>(ROVER_RING_COUNT);
-  const float delta = fmodf(bearing - ROVER_RING_ZERO_BEARING + 360.0f, 360.0f);
+  const float delta = fmodf(bearing_deg - ROVER_RING_ZERO_BEARING + 360.0f, 360.0f);
   int led = static_cast<int>(lroundf(delta / step)) % ROVER_RING_COUNT;
   if (led < 0) {
     led += ROVER_RING_COUNT;
   }
   return led;
+}
+
+int RoverPeriph::sonar_pan_to_led(float pan_deg) {
+  const float bearing = fmodf(static_cast<float>(SONAR_PAN_CENTER_DEG) - pan_deg + 360.0f, 360.0f);
+  return bearing_to_led(bearing);
+}
+
+int RoverPeriph::rear_pan_to_led(float pan_deg) {
+  // Rear aux scan uses the same 0..180° convention as sonar:
+  // 0° = left, 90° = center, 180° = right — but centered on the *rear* (180° bearing).
+  const float bearing =
+      fmodf(static_cast<float>(SONAR_PAN_CENTER_DEG) - pan_deg + 180.0f + 360.0f, 360.0f);
+  return bearing_to_led(bearing);
+}
+
+void RoverPeriph::tick_ir_map(uint32_t now_ms, bool front_l, bool front_r) {
+  // Fixed front bumper IR hits: paint them as "very close" in the forward-left/right bins.
+  // These are binary (hit/no-hit) — treat as "closest range" (~5 cm).
+  if (front_l || front_r) {
+    _ir_hold_until_ms = now_ms + 2500;
+  }
+  // Bearing convention: 0=forward, 90=left, 180=rear, 270=right.
+  const int led_fl = bearing_to_led(45.0f);   // forward-left
+  const int led_fr = bearing_to_led(315.0f);  // forward-right
+  if (front_l) {
+    _ir_bins[led_fl] = 5;
+  }
+  if (front_r) {
+    _ir_bins[led_fr] = 5;
+  }
+}
+
+void RoverPeriph::note_side_tof(uint32_t now_ms, float left_m, float right_m) {
+  // Side ToF overlay: ONLY the most-left and most-right LEDs.
+  // Note: ring left/right were observed swapped vs the display, so we intentionally
+  // swap the LED targets here (without touching the ToF topic names).
+  const int led_leftmost = bearing_to_led(90.0f);
+  const int led_rightmost = bearing_to_led(270.0f);
+  const int led_l = led_rightmost;  // swap
+  const int led_r = led_leftmost;   // swap
+  if (left_m > 0.0f) {
+    _tof_bins[led_l] = sonar_m_to_cm(left_m);
+    _tof_hold_until_ms = now_ms + 1200;
+  }
+  if (right_m > 0.0f) {
+    _tof_bins[led_r] = sonar_m_to_cm(right_m);
+    _tof_hold_until_ms = now_ms + 1200;
+  }
+}
+
+void RoverPeriph::note_ir_rear_sample(uint32_t now_ms, float pan_deg, bool hit) {
+  if (!hit) {
+    return;
+  }
+  const int led = rear_pan_to_led(pan_deg);
+  if (led < 0 || led >= ROVER_RING_COUNT) {
+    return;
+  }
+  // Rear AUX IR is binary: treat as "closest range" (~5 cm).
+  _ir_bins[led] = 5;
+  _ir_hold_until_ms = now_ms + 3500;
 }
 
 void RoverPeriph::tick_sonar_map(uint32_t now_ms, float pan_deg, float range_m, bool force_scan) {
@@ -109,13 +171,60 @@ void RoverPeriph::tick_sonar_map(uint32_t now_ms, float pan_deg, float range_m, 
     _sonar_scanning = false;
   }
 
+  // Sonar "ping" when sweeping and something is close.
+  // Rate-limit so it feels like a sensor ping, not a toy ringtone.
+  if (_sonar_scanning && range_m > 0.0f) {
+    const bool close = range_m < 0.45f;
+    if (close && now_ms >= _sonar_ping_until_ms && sweep != _sonar_last_ping_led) {
+      _sonar_last_ping_led = sweep;
+      _sonar_ping_until_ms = now_ms + 160;
+      play(kMelodySonarPing);
+    }
+  }
+
   if (!_sonar_scanning) {
     for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
       if (_sonar_bins[i] < 255) {
         _sonar_bins[i]++;
       }
     }
+    _sonar_last_ping_led = -1;
   }
 
-  sonar_frame(_sonar_bins, ROVER_RING_COUNT, static_cast<uint8_t>(sweep));
+  // Decay IR bins slowly when not in a recent IR-hold window.
+  if (now_ms > _ir_hold_until_ms) {
+    for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
+      _ir_bins[i] = 255;
+    }
+  }
+
+  // Decay ToF bins when stale.
+  if (now_ms > _tof_hold_until_ms) {
+    for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
+      _tof_bins[i] = 255;
+    }
+  }
+
+  // Build frame as: base sonar scan, then overlays on specific LEDs.
+  uint8_t frame[ROVER_RING_COUNT];
+  for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
+    frame[i] = _sonar_bins[i];
+  }
+  // Overlay ToF ONLY on leftmost/rightmost LEDs.
+  const int led_leftmost = bearing_to_led(90.0f);
+  const int led_rightmost = bearing_to_led(270.0f);
+  if (led_leftmost >= 0 && led_leftmost < ROVER_RING_COUNT && _tof_bins[led_leftmost] < 255) {
+    frame[led_leftmost] = _tof_bins[led_leftmost];
+  }
+  if (led_rightmost >= 0 && led_rightmost < ROVER_RING_COUNT && _tof_bins[led_rightmost] < 255) {
+    frame[led_rightmost] = _tof_bins[led_rightmost];
+  }
+  // Overlay IR (binary) wherever it hit (front bumper bins + rear AUX sweep bins).
+  for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
+    if (_ir_bins[i] < 255) {
+      frame[i] = _ir_bins[i];
+    }
+  }
+
+  sonar_frame(frame, ROVER_RING_COUNT, static_cast<uint8_t>(sweep));
 }

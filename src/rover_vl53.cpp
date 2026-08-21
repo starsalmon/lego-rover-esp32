@@ -75,15 +75,23 @@ static uint16_t median3(uint16_t a, uint16_t b, uint16_t c) {
   return b;
 }
 
-static float l0x_filtered_m(VL53L0X& sensor, uint16_t hist[3], uint8_t& hist_idx, float& last_m) {
+static float l0x_filtered_m(VL53L0X& sensor, uint16_t hist[3], uint8_t& hist_idx, float& last_m,
+                            uint8_t& invalid_n) {
+  // IMPORTANT: when the target moves far away, L0X can return invalids for long
+  // stretches. If we keep the last valid value forever, the UI (and brain, via
+  // ROS) will think we're still near a wall and steer badly.
   const uint16_t mm = read_l0x_mm(sensor);
-  if (mm != 0) {
-    hist[hist_idx++ % 3] = mm;
-    const uint16_t med = median3(hist[0], hist[1], hist[2]);
-    if (l0x_mm_valid(med)) {
-      last_m = mm_to_m(med);
+  if (mm == 0) {
+    if (invalid_n < 255) invalid_n++;
+    if (invalid_n >= 4) {  // ~200 ms at 50 ms continuous
+      last_m = -1.0f;
     }
+    return last_m;
   }
+  invalid_n = 0;
+  hist[hist_idx++ % 3] = mm;
+  const uint16_t med = median3(hist[0], hist[1], hist[2]);
+  last_m = l0x_mm_valid(med) ? mm_to_m(med) : -1.0f;
   return last_m;
 }
 
@@ -257,13 +265,15 @@ void RoverVl53::poll() {
     static uint16_t r_hist[3] = {};
     static uint8_t l_idx = 0;
     static uint8_t r_idx = 0;
+    static uint8_t l_invalid = 0;
+    static uint8_t r_invalid = 0;
     static float l_last = -1.0f;
     static float r_last = -1.0f;
     if (_left_ok) {
-      _left_m = l0x_filtered_m(g_l0_left, l_hist, l_idx, l_last);
+      _left_m = l0x_filtered_m(g_l0_left, l_hist, l_idx, l_last, l_invalid);
     }
     if (_right_ok) {
-      _right_m = l0x_filtered_m(g_l0_right, r_hist, r_idx, r_last);
+      _right_m = l0x_filtered_m(g_l0_right, r_hist, r_idx, r_last, r_invalid);
     }
   }
 }

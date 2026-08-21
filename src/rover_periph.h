@@ -23,6 +23,9 @@ class RoverPeriph {
   void sonar_frame(const uint8_t* dist_cm, uint8_t count, uint8_t sweep_led);
 
   void tick_sonar_map(uint32_t now_ms, float pan_deg, float range_m, bool scanning);
+  void tick_ir_map(uint32_t now_ms, bool front_l, bool front_r);
+  void note_ir_rear_sample(uint32_t now_ms, float pan_deg, bool hit);
+  void note_side_tof(uint32_t now_ms, float left_m, float right_m);
 
   static constexpr uint8_t kMelodyReady = RoverSpeaker::kMelodyReady;
   static constexpr uint8_t kMelodyAutoStart = RoverSpeaker::kMelodyAutoStart;
@@ -32,6 +35,7 @@ class RoverPeriph {
   static constexpr uint8_t kMelodyButton = RoverSpeaker::kMelodyButton;
   static constexpr uint8_t kMelodyMenu = RoverSpeaker::kMelodyMenu;
   static constexpr uint8_t kMelodyMenuDone = RoverSpeaker::kMelodyMenuDone;
+  static constexpr uint8_t kMelodySonarPing = RoverSpeaker::kMelodySonarPing;
   static constexpr uint8_t kRingStandby = RoverRing::kModeStandby;
   static constexpr uint8_t kRingReady = RoverRing::kModeReady;
   static constexpr uint8_t kRingAuto = RoverRing::kModeAuto;
@@ -40,11 +44,19 @@ class RoverPeriph {
  private:
   static uint8_t sonar_m_to_cm(float m);
   static int sonar_pan_to_led(float pan_deg);
+  static int bearing_to_led(float bearing_deg);
+  static int rear_pan_to_led(float pan_deg);
 
   RoverSpeaker _speaker;
   RoverRing _ring;
   uint8_t _sonar_bins[ROVER_RING_COUNT];
+  uint8_t _ir_bins[ROVER_RING_COUNT];
+  uint8_t _tof_bins[ROVER_RING_COUNT];
   uint32_t _sonar_hold_until_ms = 0;
   bool _sonar_scanning = false;
   bool _session_active = false;
+  uint32_t _sonar_ping_until_ms = 0;
+  int _sonar_last_ping_led = -1;
+  uint32_t _ir_hold_until_ms = 0;
+  uint32_t _tof_hold_until_ms = 0;
 };

@@ -176,6 +176,12 @@ static bool ir_wheels_on = false;
 static I2cScanResult ir_i2c_scan;
 static uint32_t last_ir_retry_ms = 0;
 static uint32_t last_ir_scan_ms = 0;
+
+// Aux IR sweep (rear 180°) for ring visualization during scans.
+static uint8_t ir_sweep_step = 0;
+static uint32_t ir_sweep_step_ms = 0;
+static bool ir_sweep_waiting = false;
+static float ir_sweep_deg = 90.0f;
 #endif
 
 #ifdef ROVER_TDISPLAY_S3
@@ -243,10 +249,14 @@ static void update_session_cal_sweep(uint32_t now_ms) {
     sonar_cal_summary_until_ms = 0;
     sonar_cal_was_active = false;
     go_cal_sweep_pending = false;
+    rover_sonar.set_cal_sweep(false);
     rover_sonar.set_pan_scan_enabled(false);
     return;
   }
-  rover_sonar.set_pan_scan_enabled(!sonar_scan_hold() && !rover_sonar.hold_pan_wiggle());
+  // Wiggle should run whenever the session is active so the brain gets
+  // real left/right glances. Holding pan at center is handled separately
+  // by scan mode (cal_sweep) and by the sonar brake behavior itself.
+  rover_sonar.set_pan_scan_enabled(!sonar_scan_hold());
   if (!session_cal_sweep_triggered && !rover_sonar.cal_sweep_active()) {
     if (go_cal_sweep_pending) {
       rover_sonar.set_cal_sweep(true);
@@ -343,6 +353,14 @@ void on_session(const void *msgin) {
   bridge_live_latched = true;
   if (prev != pi_session_sub_value) {
     rover_diag_event("session %s", pi_session_sub_value ? "on" : "off");
+#if defined(ROVER_SONAR)
+    // If session turns off, immediately cancel any scan and hold pan at center.
+    // Otherwise a scan that started right before STOP can keep sweeping in "Standby".
+    if (!pi_session_sub_value) {
+      rover_sonar.set_cal_sweep(false);
+      rover_sonar.set_pan_scan_enabled(false);
+    }
+#endif
 #if defined(ROVER_PERIPH)
     rover_periph.notify_session(pi_session_sub_value);
 #endif
@@ -1424,15 +1442,27 @@ void loop() {
       last_tof_pub = now;
       const int32_t sec = static_cast<int32_t>(now / 1000);
       const uint32_t nsec = static_cast<uint32_t>((now % 1000) * 1000000UL);
-      if (side_tof.left_ok()) {
-        const float rng = side_tof.range_left_m();
+      bool okL = side_tof.left_ok();
+      bool okR = side_tof.right_ok();
+      float mL = okL ? side_tof.range_left_m() : -1.0f;
+      float mR = okR ? side_tof.range_right_m() : -1.0f;
+#if ROVER_VL53_SWAP_LR
+      const bool t_ok = okL;
+      okL = okR;
+      okR = t_ok;
+      const float t_m = mL;
+      mL = mR;
+      mR = t_m;
+#endif
+      if (okL) {
+        const float rng = mL;
         tof_left_msg.range = (rng > 0.0f) ? rng : std::numeric_limits<float>::quiet_NaN();
         tof_left_msg.header.stamp.sec = sec;
         tof_left_msg.header.stamp.nanosec = nsec;
         RCSOFTCHECK(rcl_publish(&tof_left_pub, &tof_left_msg, NULL));
       }
-      if (side_tof.right_ok()) {
-        const float rng = side_tof.range_right_m();
+      if (okR) {
+        const float rng = mR;
         tof_right_msg.range = (rng > 0.0f) ? rng : std::numeric_limits<float>::quiet_NaN();
         tof_right_msg.header.stamp.sec = sec;
         tof_right_msg.header.stamp.nanosec = nsec;
@@ -1538,6 +1568,61 @@ void loop() {
   rover_periph.tick(now);
 #if defined(ROVER_SONAR)
   if (pi_session_sub_value || rover_sonar.cal_sweep_active()) {
+    // Side ToF overlay (left/right) onto the ring.
+#if defined(ROVER_VL53L)
+    if (side_tof.ok()) {
+      bool okL = side_tof.left_ok();
+      bool okR = side_tof.right_ok();
+      float l = okL ? side_tof.range_left_m() : -1.0f;
+      float r = okR ? side_tof.range_right_m() : -1.0f;
+#if ROVER_VL53_SWAP_LR
+      const float t_m = l;
+      l = r;
+      r = t_m;
+#endif
+      rover_periph.note_side_tof(now, l, r);
+    }
+#endif
+    // IR overlay: front bumper hits + rear aux sweep samples.
+#if defined(ROVER_MCP_IR)
+    if (mcp_ir.front_ok()) {
+      rover_periph.tick_ir_map(now, mcp_ir.front_left_hit(), mcp_ir.front_right_hit());
+    }
+    const bool want_ir_sweep = rover_sonar.cal_sweep_active() && mcp_ir.body_ok() && pca9685.ok();
+    if (want_ir_sweep) {
+      // Sweep rear aux IR over 0..180 while sonar scan is active.
+      static constexpr float kAngles[] = {0.0f, 45.0f, 90.0f, 135.0f, 180.0f, 135.0f, 90.0f, 45.0f};
+      static constexpr uint8_t kCount = sizeof(kAngles) / sizeof(kAngles[0]);
+      static constexpr uint32_t kSettleMs = 120;
+      static constexpr uint32_t kBetweenMs = 40;
+
+      if (ir_sweep_step_ms == 0) {
+        ir_sweep_step_ms = now;
+        ir_sweep_step = 0;
+        ir_sweep_waiting = false;
+      }
+      if (!ir_sweep_waiting) {
+        ir_sweep_deg = kAngles[ir_sweep_step % kCount];
+        pca9685.setAngle(ROVER_AUX_SERVO_CHANNEL, ir_sweep_deg, 0.0f, 180.0f, 500, 2500);
+        ir_sweep_step_ms = now;
+        ir_sweep_waiting = true;
+      } else if (now - ir_sweep_step_ms >= kSettleMs) {
+        bool off_hit = false;
+        bool on_hit = false;
+        mcp_ir.sample_aux(MCP_IR_AUX_OFF_MS, MCP_IR_AUX_ON_MS, off_hit, on_hit);
+        const bool hit = on_hit && !off_hit;
+        rover_periph.note_ir_rear_sample(now, ir_sweep_deg, hit);
+        ir_sweep_step++;
+        ir_sweep_step_ms = now + kBetweenMs;
+        ir_sweep_waiting = false;
+      }
+    } else {
+      ir_sweep_step_ms = 0;
+      ir_sweep_waiting = false;
+      ir_sweep_step = 0;
+      ir_sweep_deg = 90.0f;
+    }
+#endif
     rover_periph.tick_sonar_map(now, rover_sonar.pan_deg(), rover_sonar.range_m(),
                                 rover_sonar.cal_sweep_active());
   }
