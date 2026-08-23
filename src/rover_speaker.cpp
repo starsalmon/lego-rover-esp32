@@ -6,7 +6,7 @@ namespace {
 
 constexpr uint8_t kDutyBits = 8;
 constexpr uint8_t kDutyOn = (1u << kDutyBits) / 3;
-constexpr uint16_t kNoteGapMs = 8;
+constexpr uint16_t kNoteGapMs = 5;
 constexpr float kVol = 0.48f;
 
 // Notification cues — “Nokia-ish” bleeps: short, stepwise, slightly moody.
@@ -18,7 +18,7 @@ struct Note {
 };
 
 struct MelodyDef {
-  Note notes[6];
+  Note notes[16];
   uint8_t count;
 };
 
@@ -31,40 +31,55 @@ enum : uint16_t {
   F3 = 175,
   G3 = 196,
   A3 = 220,
+  B3 = 247,
   C4 = 262,
   D4 = 294,
   E4 = 330,
   F4 = 349,
+  Fs4 = 370,
   G4 = 392,
   A4 = 440,
+  B4 = 494,
   C5 = 523,
   D5 = 587,
   E5 = 659,
+  Fs5 = 740,
   G5 = 784,
+  A5 = 880,
 };
 
 static const MelodyDef kMelodies[] = {
     {},  // 0 unused
-    // ready — subtle “connected”
-    {{NOTE(D5, 34), NOTE(E5, 34), NOTE(D5, 34), NOTE(A4, 44)}, 4},
-    // auto start — step up, settle
-    {{NOTE(C5, 30), NOTE(D5, 30), NOTE(E5, 38), NOTE(D5, 36)}, 4},
-    // auto stop — step down, settle
-    {{NOTE(E5, 30), NOTE(D5, 30), NOTE(C5, 40), NOTE(A4, 44)}, 4},
-    // bump — low “thunk thunk”
+    // Tempo basis: MIDI was 140 BPM.
+    // 16th note ≈ 107 ms, 8th ≈ 214 ms, quarter ≈ 429 ms.
+    // Keep a tiny gap (kNoteGapMs) but let durations carry the groove.
+    //
+    // ready — longer “release” version (startup connect cue)
+    {{NOTE(B4, 108), NOTE(D5, 108), NOTE(E5, 108), NOTE(Fs5, 108), NOTE(B4, 108), NOTE(D5, 108),
+      NOTE(E5, 108), NOTE(Fs5, 108), NOTE(G5, 216), NOTE(Fs5, 108), NOTE(E5, 108), NOTE(D5, 108),
+      NOTE(B4, 180), NOTE(D5, 180), NOTE(E5, 200), NOTE(G5, 480)},
+     16},
+    // auto start — session start (short hype)
+    {{NOTE(B4, 108), NOTE(D5, 108), NOTE(E5, 108), NOTE(Fs5, 108), NOTE(G5, 216), NOTE(Fs5, 108),
+      NOTE(E5, 108), NOTE(D5, 216)},
+     8},
+    // auto stop — session stop (quick fall + resolve)
+    {{NOTE(G5, 108), NOTE(Fs5, 108), NOTE(E5, 108), NOTE(D5, 216), NOTE(B4, 216), NOTE(A4, 420)},
+     6},
+    // bump — restore original “thunk thunk”
     {{NOTE(A3, 55), NOTE(A3, 55), NOTE(E3, 62)}, 3},
-    // stall — lower, longer “stuck”
+    // stall — restore original “stuck”
     {{NOTE(G3, 62), NOTE(F4, 44), NOTE(D4, 62)}, 3},
-    // front_ir — crisp warning
-    {{NOTE(E5, 28), NOTE(E5, 28), NOTE(C5, 44)}, 3},
-    // button — tiny two-tone pip
-    {{NOTE(C5, 18), NOTE(E5, 22)}, 2},
-    // menu — open pip-pip
-    {{NOTE(C5, 18), NOTE(D5, 20), NOTE(C5, 22)}, 3},
-    // menu_done — confirm pip-pip-down
-    {{NOTE(E5, 18), NOTE(D5, 20), NOTE(C5, 30)}, 3},
-    // sonar_ping — quick “ping” (used during sonar sweep)
-    {{NOTE(G5, 14), NOTE(E5, 18)}, 2},
+    // front_ir — crisp warning (high staccato)
+    {{NOTE(Fs5, 36), NOTE(Fs5, 36), NOTE(D5, 60)}, 3},
+    // button — go pip (mini riff)
+    {{NOTE(B4, 52), NOTE(D5, 52), NOTE(E5, 72)}, 3},
+    // menu — short up/down (techy)
+    {{NOTE(E5, 44), NOTE(Fs5, 44), NOTE(E5, 60)}, 3},
+    // menu_done — confirm down
+    {{NOTE(Fs5, 44), NOTE(E5, 44), NOTE(D5, 72)}, 3},
+    // sonar_ping — quick “ping” (brighter)
+    {{NOTE(Fs5, 16), NOTE(D5, 22)}, 2},
 };
 
 #undef NOTE

@@ -282,7 +282,14 @@ static const char *stable_mode_label(const char *raw, uint32_t now_ms) {
 }
 
 static const char *drive_mode_name(uint8_t mode) {
-  return mode == 1 ? "Wall" : "Explore";
+  switch (mode) {
+    case 1:
+      return "Wall";
+    case 2:
+      return "ServoCal";
+    default:
+      return "Explore";
+  }
 }
 
 static const char *power_action_name(uint8_t action) {

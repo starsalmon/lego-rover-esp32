@@ -24,7 +24,8 @@ enum RoverButtonEvent : uint8_t {
 enum RoverDriveMode : uint8_t {
   kDriveExplore = 0,
   kDriveWall = 1,
-  kDriveModeCount = 2,
+  kDriveServoCal = 2,  // bench-only: pan/sonar timing calibration (does not start motion)
+  kDriveModeCount = 3,
 };
 
 enum RoverPowerAction : uint8_t {
@@ -38,6 +39,8 @@ inline const char *drive_mode_label(RoverDriveMode mode) {
   switch (mode) {
     case kDriveWall:
       return "Wall";
+    case kDriveServoCal:
+      return "ServoCal";
     default:
       return "Explore";
   }

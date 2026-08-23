@@ -37,7 +37,7 @@ class RoverSonar {
   void set_aux_scan(RoverMcpIr* ir);
   void boot_full_sweep();
 
-  /** Bench validation: sweep 90° → 180° → 0° → 90° with dwell at each stop. */
+  /** Scan sweep: multi-angle sample across 0..180°, then return to center. */
   void set_cal_sweep(bool active);
   bool cal_sweep_active() const { return _cal_sweep_active; }
   uint8_t cal_step() const { return _cal_step; }
@@ -50,6 +50,11 @@ class RoverSonar {
   /** When enabled (explore / bench cal), run the cruise pan wiggle.
    *  When disabled (standby idle), hold center — independent of wheel motion. */
   void set_pan_scan_enabled(bool enabled);
+  /** Directly command the pan (bench/calibration). */
+  void set_pan_deg(float deg) { set_pan(deg); }
+  /** Cal-sweep dwell model (ms per degree), inferred from bench calibration. */
+  void set_cal_ms_per_deg(float ms_per_deg) { _cal_ms_per_deg = ms_per_deg; }
+  float cal_ms_per_deg() const { return _cal_ms_per_deg; }
   /** Pause cruise wiggle near obstacles — hold pan at center. */
   bool hold_pan_wiggle() const;
 
@@ -88,9 +93,11 @@ class RoverSonar {
   uint32_t _cal_step_ms = 0;
   volatile bool _cal_capture_pending = false;
   volatile float _cal_capture_pan = 90.0f;
+  uint16_t _cal_dwell_ms = 160;
+  float _cal_ms_per_deg = 2.4f;  // conservative default; bench-calibrate for your servo
   uint8_t _cal_snap_count = 0;
-  float _cal_snap_pan[4] = {90.0f, 90.0f, 90.0f, 90.0f};
-  float _cal_snap_range[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+  float _cal_snap_pan[12] = {90.0f};
+  float _cal_snap_range[12] = {-1.0f};
   float _range_ring[3] = {-1.0f, -1.0f, -1.0f};
   uint8_t _range_ring_n = 0;
 };

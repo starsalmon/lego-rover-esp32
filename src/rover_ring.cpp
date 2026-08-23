@@ -216,19 +216,14 @@ void RoverRing::render(uint32_t now_ms) {
       break;
     case kModeSonar:
       for (uint8_t i = 0; i < _count; i++) {
-        if (i == _sonar_sweep) {
-          // Sweep cursor: turns red when the current ray is "close".
-          const uint8_t d = _sonar_bins[i];
-          if (d < 255 && d <= 28) {  // ~28 cm
-            set_pixel(i, 240, 40, 10);
-          } else {
-            set_pixel(i, 40, 200, 255);
-          }
-          continue;
-        }
         const uint8_t d = _sonar_bins[i];
         if (d >= 255) {
-          set_pixel(i, 0, 10, 24);
+          // Unknown distance.
+          if (i == _sonar_sweep) {
+            set_pixel(i, 40, 200, 255);
+          } else {
+            set_pixel(i, 0, 10, 24);
+          }
           continue;
         }
         // Shared distance colormap (sonar / ToF / IR overlays all use cm bins).
@@ -240,6 +235,19 @@ void RoverRing::render(uint32_t now_ms) {
         uint8_t g = 0;
         uint8_t b = 0;
         hsv_color(h, 1.0f, v, r, g, b);
+
+        if (i == _sonar_sweep) {
+          // Cursor highlight: *blend* so ToF pixels keep the same gradient mapping.
+          // Close highlight leans red; otherwise a cool cyan dot.
+          const bool close = d <= 28;
+          const uint8_t hr = close ? 220 : 60;
+          const uint8_t hg = close ? 60 : 210;
+          const uint8_t hb = close ? 20 : 255;
+          r = static_cast<uint8_t>(constrain(static_cast<int>(r) + static_cast<int>(hr * 0.55f), 0, 255));
+          g = static_cast<uint8_t>(constrain(static_cast<int>(g) + static_cast<int>(hg * 0.55f), 0, 255));
+          b = static_cast<uint8_t>(constrain(static_cast<int>(b) + static_cast<int>(hb * 0.55f), 0, 255));
+        }
+
         set_pixel(i, r, g, b);
       }
       break;

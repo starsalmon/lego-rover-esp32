@@ -3,6 +3,11 @@
 #include <Arduino.h>
 #include <stdint.h>
 
+#if defined(ARDUINO_ARCH_ESP32)
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#endif
+
 #include "rover_pins_s3.h"
 #include "rover_ring.h"
 #include "rover_speaker.h"
@@ -54,9 +59,15 @@ class RoverPeriph {
   uint8_t _tof_bins[ROVER_RING_COUNT];
   uint32_t _sonar_hold_until_ms = 0;
   bool _sonar_scanning = false;
+  uint32_t _sonar_post_scan_until_ms = 0;
   bool _session_active = false;
   uint32_t _sonar_ping_until_ms = 0;
   int _sonar_last_ping_led = -1;
   uint32_t _ir_hold_until_ms = 0;
   uint32_t _tof_hold_until_ms = 0;
+
+#if defined(ARDUINO_ARCH_ESP32)
+  static void speaker_task(void* arg);
+  TaskHandle_t _speaker_task = nullptr;
+#endif
 };

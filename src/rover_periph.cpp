@@ -19,11 +19,29 @@ bool RoverPeriph::begin(int speaker_pin, int ring_pin) {
     Serial.printf("RoverPeriph speaker GPIO %d=%s ring GPIO %d=%s\n", speaker_pin,
                   spk ? "OK" : "--", ring_pin, ring ? "OK" : "--");
   }
+
+#if defined(ARDUINO_ARCH_ESP32)
+  // Speaker timing must not depend on the main loop cadence.
+  // If the loop stalls (WiFi, I2C, display), tones get “dragged out”.
+  // Run a tiny task to tick the speaker at a steady rate.
+  if (spk && _speaker_task == nullptr) {
+    xTaskCreatePinnedToCore(&RoverPeriph::speaker_task, "rover_spk", 2048, this, 2, &_speaker_task,
+                            0);
+  }
+#endif
+
   return spk || ring;
 }
 
 void RoverPeriph::tick(uint32_t now_ms) {
+  // If a dedicated speaker task exists, it owns speaker timing.
+#if !defined(ARDUINO_ARCH_ESP32)
   _speaker.tick(now_ms);
+#else
+  if (_speaker_task == nullptr) {
+    _speaker.tick(now_ms);
+  }
+#endif
   _ring.tick(now_ms);
 }
 
@@ -162,13 +180,18 @@ void RoverPeriph::tick_sonar_map(uint32_t now_ms, float pan_deg, float range_m, 
   }
 
   const bool off_center = fabsf(pan_deg - static_cast<float>(SONAR_PAN_CENTER_DEG)) > 10.0f;
+  const bool was_scanning = _sonar_scanning;
   if (off_center || force_scan) {
     _sonar_scanning = true;
-    _sonar_hold_until_ms = now_ms + 4000;
+    _sonar_hold_until_ms = now_ms + 6500;
   } else if (_sonar_scanning && now_ms < _sonar_hold_until_ms) {
     // Keep bins while pan returns to centre.
   } else {
     _sonar_scanning = false;
+  }
+  if (was_scanning && !_sonar_scanning) {
+    // Persist the final scan map for a bit after a sweep ends.
+    _sonar_post_scan_until_ms = now_ms + 6000;
   }
 
   // Sonar "ping" when sweeping and something is close.
@@ -183,9 +206,12 @@ void RoverPeriph::tick_sonar_map(uint32_t now_ms, float pan_deg, float range_m, 
   }
 
   if (!_sonar_scanning) {
-    for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
-      if (_sonar_bins[i] < 255) {
-        _sonar_bins[i]++;
+    // Hold the map briefly after a scan ends, then decay slowly.
+    if (now_ms >= _sonar_post_scan_until_ms) {
+      for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
+        if (_sonar_bins[i] < 255) {
+          _sonar_bins[i]++;
+        }
       }
     }
     _sonar_last_ping_led = -1;
@@ -228,3 +254,15 @@ void RoverPeriph::tick_sonar_map(uint32_t now_ms, float pan_deg, float range_m, 
 
   sonar_frame(frame, ROVER_RING_COUNT, static_cast<uint8_t>(sweep));
 }
+
+#if defined(ARDUINO_ARCH_ESP32)
+void RoverPeriph::speaker_task(void* arg) {
+  auto* self = static_cast<RoverPeriph*>(arg);
+  const TickType_t kDelay = pdMS_TO_TICKS(2);  // ~500 Hz tick => tight note timing
+  for (;;) {
+    const uint32_t now_ms = millis();
+    self->_speaker.tick(now_ms);
+    vTaskDelay(kDelay);
+  }
+}
+#endif

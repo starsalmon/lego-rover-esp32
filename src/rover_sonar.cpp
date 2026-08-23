@@ -99,7 +99,7 @@ void RoverSonar::service_cal_capture() {
     return;
   }
   _cal_capture_pending = false;
-  if (_cal_snap_count >= 4) {
+  if (_cal_snap_count >= 12) {
     return;
   }
   const float rng = read_range();
@@ -109,6 +109,10 @@ void RoverSonar::service_cal_capture() {
   _cal_snap_pan[_cal_snap_count] = _cal_capture_pan;
   _cal_snap_range[_cal_snap_count] = (rng > 0.0f) ? rng : _last_range_m;
   ++_cal_snap_count;
+
+  // Advance sweep step ONLY once a capture has been stored, so the pan task
+  // cannot move to the next angle before the reading is taken.
+  _cal_step++;
 }
 
 void RoverSonar::set_cal_sweep(bool active) {
@@ -127,7 +131,7 @@ void RoverSonar::set_cal_sweep(bool active) {
   _cal_step_ms = 0;
   _cal_snap_count = 0;
   _cal_capture_pending = false;
-  for (uint8_t i = 0; i < 4; i++) {
+  for (uint8_t i = 0; i < 12; i++) {
     _cal_snap_pan[i] = center_pan();
     _cal_snap_range[i] = -1.0f;
   }
@@ -156,33 +160,50 @@ void RoverSonar::update_pan_wiggle(uint32_t now_ms) {
   }
 
   if (_cal_sweep_active) {
-    static constexpr float kCalAngles[] = {90.0f, 180.0f, 0.0f, 90.0f};
-    static constexpr uint8_t kCalCount = 4;
+    // Multi-angle scan (not just left/right/center) to help pick a safe drive-out.
+    static constexpr float kCalAngles[] = {90.0f, 135.0f, 180.0f, 135.0f, 90.0f, 45.0f, 0.0f, 45.0f, 90.0f};
+    static constexpr uint8_t kCalCount = sizeof(kCalAngles) / sizeof(kCalAngles[0]);
 #ifndef SONAR_CAL_DWELL_MS
-#define SONAR_CAL_DWELL_MS 900
+#define SONAR_CAL_DWELL_MS 160
 #endif
     if (_cal_step >= kCalCount) {
       _cal_sweep_active = false;
       rover_diag_ckpt(kCkptPanCalDone, _cal_snap_count);
       return;
     }
+
+    // Critical: do not advance pan while the main loop is capturing a sample for
+    // the current angle. Otherwise range reads get attributed to the wrong pan.
+    if (_cal_capture_pending) {
+      return;
+    }
+
     if (_cal_step_ms == 0) {
       if (now_ms - _last_pan_write_ms < SONAR_PAN_WRITE_MS) {
         return;
       }
       _last_pan_write_ms = now_ms;
+
+      // Servo is not instantaneous. Dwell must cover travel + settle.
+      // Use a bench-calibrated ms/deg model (and always enforce a minimum).
+      const float delta = fabsf(kCalAngles[_cal_step] - _pan_deg);
+      const float dwell = fmaxf(static_cast<float>(SONAR_CAL_DWELL_MS), delta * _cal_ms_per_deg);
+      _cal_dwell_ms = static_cast<uint16_t>(
+          constrain(static_cast<int>(lroundf(dwell)), static_cast<int>(SONAR_CAL_DWELL_MS), 360));
+
       set_pan(kCalAngles[_cal_step]);
       _cal_step_ms = now_ms;
       rover_diag_ckpt(kCkptCalPanMove, static_cast<uint32_t>(kCalAngles[_cal_step]));
       return;
     }
-    if (now_ms - _cal_step_ms < static_cast<uint32_t>(SONAR_CAL_DWELL_MS)) {
+    if (now_ms - _cal_step_ms < static_cast<uint32_t>(_cal_dwell_ms)) {
       return;
     }
     _cal_capture_pan = kCalAngles[_cal_step];
     _cal_capture_pending = true;
     rover_diag_ckpt(kCkptCalDwellEnd, static_cast<uint32_t>(kCalAngles[_cal_step]));
-    _cal_step++;
+    // Step advance happens only after capture completes in service_cal_capture().
+    // This keeps pan fixed at the requested angle until a sample is taken.
     _cal_step_ms = 0;
     return;
   }

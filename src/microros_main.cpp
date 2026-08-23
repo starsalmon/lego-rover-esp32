@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <Preferences.h>
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
@@ -253,10 +254,9 @@ static void update_session_cal_sweep(uint32_t now_ms) {
     rover_sonar.set_pan_scan_enabled(false);
     return;
   }
-  // Wiggle should run whenever the session is active so the brain gets
-  // real left/right glances. Holding pan at center is handled separately
-  // by scan mode (cal_sweep) and by the sonar brake behavior itself.
-  rover_sonar.set_pan_scan_enabled(!sonar_scan_hold());
+  // Cain request (Aug 2026): disable cruise wiggle while driving.
+  // Hold pan forward; only move during explicit scans (cal_sweep).
+  rover_sonar.set_pan_scan_enabled(false);
   if (!session_cal_sweep_triggered && !rover_sonar.cal_sweep_active()) {
     if (go_cal_sweep_pending) {
       rover_sonar.set_cal_sweep(true);
@@ -454,6 +454,121 @@ static uint32_t menu_saved_flash_until = 0;
 static uint32_t key_flash_until = 0;
 static uint32_t button_priority_until = 0;
 
+#if defined(ROVER_SONAR)
+static char ui_note_buf[64] = {};
+static uint32_t ui_note_until_ms = 0;
+static Preferences prefs;
+static bool prefs_ok = false;
+
+// Declared later in this file.
+static void force_stop(const char *reason);
+
+static float read_stable_range_m(uint32_t timeout_ms,
+                                 float eps_m,
+                                 uint8_t need_samples,
+                                 float *out_range_m) {
+  uint32_t t0 = millis();
+  float last = -1.0f;
+  uint8_t stable = 0;
+  float best = -1.0f;
+  while (millis() - t0 < timeout_ms) {
+    const float r = sonar.read_range_m();
+    if (r > 0.0f) {
+      best = r;
+      if (last > 0.0f && fabsf(r - last) <= eps_m) {
+        stable++;
+      } else {
+        stable = 0;
+      }
+      last = r;
+      if (stable + 1 >= need_samples) {
+        if (out_range_m) {
+          *out_range_m = best;
+        }
+        return best;
+      }
+    } else {
+      stable = 0;
+      last = -1.0f;
+    }
+    // Keep micro-ROS responsive while we bench-calibrate.
+    spin_ros_input();
+#if defined(ROVER_PERIPH)
+    rover_periph.tick(millis());
+#endif
+  }
+  if (out_range_m) {
+    *out_range_m = best;
+  }
+  return best;
+}
+
+static uint32_t measure_pan_settle_ms(float target_deg,
+                                      float eps_m = 0.03f,
+                                      uint8_t need_samples = 3,
+                                      uint32_t timeout_ms = 2500) {
+  const uint32_t t0 = millis();
+  rover_sonar.set_pan_deg(target_deg);
+  float out = -1.0f;
+  (void)read_stable_range_m(timeout_ms, eps_m, need_samples, &out);
+  return millis() - t0;
+}
+
+static void run_pan_timing_cal(uint32_t now_ms) {
+  (void)now_ms;
+
+  // Safety: never run during an active driving session.
+  if (pi_session_sub_value) {
+    return;
+  }
+
+  rover_diag_event("pan_cal start");
+
+  // Stop wheels, stop any scan mode.
+  force_stop("pan_cal");
+  rover_sonar.set_cal_sweep(false);
+  rover_sonar.set_pan_scan_enabled(false);
+
+  // Pause the dedicated pan task so this routine exclusively owns pan writes.
+  if (pan_task_handle) {
+    vTaskSuspend(pan_task_handle);
+  }
+
+  // Move to center and allow a quick settle.
+  rover_sonar.set_pan_deg(90.0f);
+  delay(220);
+
+  // User setup: front open; obstacle hard-left (0°) and hard-right (180°).
+  const uint32_t left_ms = measure_pan_settle_ms(0.0f);
+  delay(120);
+  const uint32_t right_ms = measure_pan_settle_ms(180.0f);
+  delay(120);
+  rover_sonar.set_pan_deg(90.0f);
+
+  if (pan_task_handle) {
+    vTaskResume(pan_task_handle);
+  }
+
+  const float ms_per_deg = fmaxf(static_cast<float>(left_ms), static_cast<float>(right_ms)) / 90.0f;
+  rover_sonar.set_cal_ms_per_deg(ms_per_deg);
+  if (prefs_ok) {
+    prefs.putFloat("pan_ms_deg", ms_per_deg);
+    prefs.putUInt("pan_left_ms", left_ms);
+    prefs.putUInt("pan_right_ms", right_ms);
+  }
+
+  snprintf(ui_note_buf, sizeof(ui_note_buf), "PAN CAL L=%lums R=%lums (%.2fms/deg)",
+           static_cast<unsigned long>(left_ms), static_cast<unsigned long>(right_ms), ms_per_deg);
+  ui_note_until_ms = millis() + 15000;
+  rover_diag_event("%s", ui_note_buf);
+
+  // Short confirm.
+#if defined(ROVER_PERIPH)
+  rover_periph.play(RoverPeriph::kMelodyMenuDone);
+#endif
+}
+#endif
+
 static void flash_key_feedback(uint32_t now_ms) {
   key_flash_until = now_ms + 220;
   button_priority_until = now_ms + 500;
@@ -512,6 +627,16 @@ static void handle_go_button_event(RoverButtonEvent ev, uint32_t now_ms) {
     mode_menu_open = false;
     menu_saved_flash_until = 0;
     rover_periph.play(RoverPeriph::kMelodyButton);
+
+#if defined(ROVER_SONAR)
+    // Bench utility: when "ServoCal" mode is selected and we're in standby,
+    // use Go short to run a local pan timing calibration instead of starting a session.
+    if (!pi_session_sub_value && selected_drive_mode == kDriveServoCal) {
+      run_pan_timing_cal(now_ms);
+      return;
+    }
+#endif
+
     if (ros_state == RosState::kConnected) {
       button_msg.data = true;
       RCSOFTCHECK(rcl_publish(&button_pub, &button_msg, NULL));
@@ -1211,6 +1336,17 @@ void setup() {
 #if defined(ROVER_SONAR)
   if (sonar.begin(SONAR_TRIG_PIN, SONAR_ECHO_PIN)) {
     rover_sonar.begin(&sonar, pca9685.ok() ? &pca9685 : nullptr);
+    // Load persisted pan timing calibration (optional).
+    if (!prefs_ok) {
+      prefs_ok = prefs.begin("rover", false);
+    }
+    if (prefs_ok) {
+      const float ms_deg = prefs.getFloat("pan_ms_deg", NAN);
+      if (isfinite(ms_deg) && ms_deg > 0.5f && ms_deg < 12.0f) {
+        rover_sonar.set_cal_ms_per_deg(ms_deg);
+        rover_diag_event("pan_cal load ms/deg=%.2f", ms_deg);
+      }
+    }
 #if ROVER_BOOT_PAN_SWEEP
     rover_sonar.boot_full_sweep();
 #endif
@@ -1706,6 +1842,12 @@ void loop() {
 #endif
   ui.boot_reason = boot_reason_buf[0] ? boot_reason_buf : nullptr;
   ui.boot_reason_until_ms = boot_reason_until_ms;
+#if defined(ROVER_SONAR)
+  if (ui_note_buf[0] && ui_note_until_ms > now) {
+    ui.boot_reason = ui_note_buf;
+    ui.boot_reason_until_ms = ui_note_until_ms;
+  }
+#endif
   if (estop.active()) {
     ui.mode = "E-STOP";
   } else if (battery.critical()) {
