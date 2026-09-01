@@ -57,7 +57,7 @@ static const MelodyDef kMelodies[] = {
     // ready — longer “release” version (startup connect cue)
     {{NOTE(B4, 108), NOTE(D5, 108), NOTE(E5, 108), NOTE(Fs5, 108), NOTE(B4, 108), NOTE(D5, 108),
       NOTE(E5, 108), NOTE(Fs5, 108), NOTE(G5, 216), NOTE(Fs5, 108), NOTE(E5, 108), NOTE(D5, 108),
-      NOTE(B4, 180), NOTE(D5, 180), NOTE(E5, 200), NOTE(G5, 480)},
+      NOTE(B4, 100), NOTE(D5, 100), NOTE(E5, 120), NOTE(G5, 280)},
      16},
     // auto start — session start (short hype)
     {{NOTE(B4, 108), NOTE(D5, 108), NOTE(E5, 108), NOTE(Fs5, 108), NOTE(G5, 216), NOTE(Fs5, 108),
