@@ -1,5 +1,7 @@
 #include "drive.h"
 
+#include <math.h>
+
 namespace {
 
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
@@ -82,36 +84,45 @@ void SmoothDrive::set_target(float left, float right) {
 }
 
 void SmoothDrive::tick() {
-  const bool spinning = (_tgt_l * _tgt_r < 0.0f) && (fabsf(_tgt_l) > 0.05f || fabsf(_tgt_r) > 0.05f);
-  const float max_step = spinning ? SPIN_STEP : MAX_STEP;
+  const uint32_t now = millis();
+  float dt = (_last_ms == 0) ? 0.01f : (now - _last_ms) * 0.001f;
+  _last_ms = now;
+  if (dt <= 0.0f) {
+    return;
+  }
+  // A stalled loop must not dump a huge step into the wheels.
+  if (dt > 0.04f) {
+    dt = 0.04f;
+  }
+
   auto step = [&](float &cur, float tgt) {
-    // Bleed to zero before reversing — stops DIR-pin judder on fwd↔rev.
-    if (cur * tgt < -MOVE_EPS * MOVE_EPS) {
+    // Bleed to zero before reversing — DIR pin never flips while a wheel is moving.
+    if (cur * tgt < 0.0f && fabsf(cur) > MOVE_EPS) {
       tgt = 0.0f;
     }
-    const float step_lim =
-        (cur * tgt < 0.0f && fabsf(cur) > MOVE_EPS) ? SPIN_STEP : max_step;
+    const bool slowing = fabsf(tgt) < (fabsf(cur) - 0.001f);
+    const float rate = slowing ? BRAKE_PER_S : ACCEL_PER_S;
+    const float step_lim = rate * dt;
     float d = tgt - cur;
-    if (d > step_lim) d = step_lim;
-    if (d < -step_lim) d = -step_lim;
+    if (d > step_lim) {
+      d = step_lim;
+    }
+    if (d < -step_lim) {
+      d = -step_lim;
+    }
     cur += d;
+    if (fabsf(tgt) < MOVE_EPS && fabsf(cur) < MOVE_EPS) {
+      cur = 0.0f;
+    }
   };
   step(_cur_l, _tgt_l);
   step(_cur_r, _tgt_r);
-  // Keep spin ramp symmetric — avoids one wheel dragging (circles instead of pivot).
-  if (spinning) {
-    const float mag = fmaxf(fabsf(_cur_l), fabsf(_cur_r));
-    if (mag > MOVE_EPS) {
-      const float sign = (_tgt_r > 0.0f) ? 1.0f : -1.0f;
-      _cur_l = -sign * mag;
-      _cur_r = sign * mag;
-    }
-  }
   _apply(_cur_l, _cur_r);
 }
 
-void SmoothDrive::stop() {
+void SmoothDrive::hard_stop() {
   _tgt_l = _tgt_r = _cur_l = _cur_r = 0;
+  _last_ms = millis();
   _apply(0, 0);
 }
 
@@ -164,15 +175,6 @@ static void _motor_map_lr(float &l, float &r) {
 void SmoothDrive::_apply(float l, float r) {
   if (!_pwm_ok) return;
   _motor_map_lr(l, r);
-
-  // Spin: equal wheel magnitudes so MIN_PWM floor doesn't pivot on one side.
-  if (l * r < 0.0f) {
-    const float mag = fmaxf(fabsf(l), fabsf(r));
-    if (mag > MOVE_EPS) {
-      l = (l < 0.0f) ? -mag : mag;
-      r = (r < 0.0f) ? -mag : mag;
-    }
-  }
 
   const uint32_t max_duty = (1u << _pwm_bits) - 1;
   auto one = [&](int dir_pin, int pwm_pin, float v, float min_pwm) {

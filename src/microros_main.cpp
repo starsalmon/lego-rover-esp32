@@ -353,14 +353,16 @@ void on_session(const void *msgin) {
   bridge_live_latched = true;
   if (prev != pi_session_sub_value) {
     rover_diag_event("session %s", pi_session_sub_value ? "on" : "off");
-#if defined(ROVER_SONAR)
-    // If session turns off, immediately cancel any scan and hold pan at center.
-    // Otherwise a scan that started right before STOP can keep sweeping in "Standby".
     if (!pi_session_sub_value) {
+      drv.set_target(0.0f, 0.0f);
+      last_lin = 0.0f;
+      last_ang = 0.0f;
+      heading.disarm();
+#if defined(ROVER_SONAR)
       rover_sonar.set_cal_sweep(false);
       rover_sonar.set_pan_scan_enabled(false);
-    }
 #endif
+    }
 #if defined(ROVER_PERIPH)
     rover_periph.notify_session(pi_session_sub_value);
 #endif
@@ -1013,11 +1015,11 @@ static void apply_drive(float yaw_rate, float dt) {
   constexpr uint32_t CMD_TIMEOUT_MS = 400;
   const bool cmd_fresh = (millis() - last_drive_ms) <= CMD_TIMEOUT_MS;
 #if defined(ROVER_SONAR)
-  if (!sonar_drive_override && !cmd_fresh) {
+  if (!sonar_drive_override && (!cmd_fresh || !pi_session_sub_value)) {
 #else
-  if (!cmd_fresh) {
+  if (!cmd_fresh || !pi_session_sub_value) {
 #endif
-    force_stop(nullptr);
+    drv.set_target(0.0f, 0.0f);
     return;
   }
 
@@ -1068,34 +1070,37 @@ static void apply_drive(float yaw_rate, float dt) {
   } else {
     heading.disarm();
   }
-  last_heading_trim = trim;
+  static float trim_out = 0.0f;
+  const float trim_step = 0.35f * ((dt > 0.0001f && dt < 0.05f) ? dt : 0.01f);
+  if (trim > trim_out + trim_step) {
+    trim_out += trim_step;
+  } else if (trim < trim_out - trim_step) {
+    trim_out -= trim_step;
+  } else {
+    trim_out = trim;
+  }
+  last_heading_trim = trim_out;
 
   float l, r;
 
   constexpr float STEER_DEAD = 0.02f;
-  constexpr float LIN_SPIN_MAX = 0.08f;
+  constexpr float MIN_WHEEL = 0.05f;
 
-  const bool spin_mode = fabsf(turn) > STEER_DEAD && fabsf(v) < LIN_SPIN_MAX;
-
-  if (spin_mode) {
-    trim = 0;
-    v = 0.0f;
-    l = -turn;
-    r = turn;
-  } else if (fabsf(turn) < STEER_DEAD) {
-    l = v + trim;
-    r = v - trim;
+  // Never in-place spin. Opposite-wheel commands are how the waggle happens;
+  // clamp turn so both wheels keep the sign of v (or both sit at ~0).
+  if (fabsf(turn) < STEER_DEAD) {
+    l = v + trim_out;
+    r = v - trim_out;
+  } else if (fabsf(v) < MIN_WHEEL) {
+    l = v;
+    r = v;
   } else {
-    constexpr float MIN_WHEEL = 0.06f;
-    if (fabsf(v) > MIN_WHEEL) {
-      const float max_turn = fabsf(v) - MIN_WHEEL;
-      if (fabsf(turn) > max_turn) {
-        turn = (turn > 0.0f) ? max_turn : -max_turn;
-      }
+    const float max_turn = fabsf(v) - MIN_WHEEL;
+    if (fabsf(turn) > max_turn) {
+      turn = (turn > 0.0f) ? max_turn : -max_turn;
     }
     l = v - turn;
     r = v + turn;
-    trim = 0;
   }
 
   const float peak = fmaxf(fabsf(l), fabsf(r));
@@ -1118,7 +1123,7 @@ void on_cmd(const void *msgin) {
   }
   const auto *msg = (const geometry_msgs__msg__Twist *)msgin;
 #ifndef CMD_VEL_CROSS_FIX
-#define CMD_VEL_CROSS_FIX 1
+#define CMD_VEL_CROSS_FIX 0
 #endif
 #if CMD_VEL_CROSS_FIX
   last_lin = msg->angular.z;

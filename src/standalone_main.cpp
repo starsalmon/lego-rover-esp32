@@ -256,7 +256,7 @@ static void apply_drive(float yaw_rate, float dt) {
   constexpr uint32_t CMD_TIMEOUT_MS = 400;
   const bool cmd_fresh = (millis() - last_drive_ms) <= CMD_TIMEOUT_MS;
   if (!local_session && !sonar_drive_override && !cmd_fresh) {
-    force_stop(nullptr);
+    drv.set_target(0.0f, 0.0f);
     return;
   }
 
@@ -269,28 +269,20 @@ static void apply_drive(float yaw_rate, float dt) {
 
   float l, r;
   constexpr float STEER_DEAD = 0.02f;
-  constexpr float LIN_SPIN_MAX = 0.08f;
-  const bool spin_mode = fabsf(turn) > STEER_DEAD && fabsf(v) < LIN_SPIN_MAX;
-
-  if (spin_mode) {
-    trim = 0.0f;
-    v = 0.0f;
-    l = -turn;
-    r = turn;
-  } else if (fabsf(turn) < STEER_DEAD) {
+  constexpr float MIN_WHEEL = 0.05f;
+  if (fabsf(turn) < STEER_DEAD) {
     l = v + trim;
     r = v - trim;
+  } else if (fabsf(v) < MIN_WHEEL) {
+    l = v;
+    r = v;
   } else {
-    constexpr float MIN_WHEEL = 0.06f;
-    if (fabsf(v) > MIN_WHEEL) {
-      const float max_turn = fabsf(v) - MIN_WHEEL;
-      if (fabsf(turn) > max_turn) {
-        turn = (turn > 0.0f) ? max_turn : -max_turn;
-      }
+    const float max_turn = fabsf(v) - MIN_WHEEL;
+    if (fabsf(turn) > max_turn) {
+      turn = (turn > 0.0f) ? max_turn : -max_turn;
     }
     l = v - turn;
     r = v + turn;
-    trim = 0.0f;
   }
 
   const float peak = fmaxf(fabsf(l), fabsf(r));
