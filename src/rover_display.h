@@ -31,20 +31,13 @@ struct RoverUiData {
   int ota_state = 0;       // OtaState: 0 off, 1 connecting, 2 ready, 3 failed
   const char *wifi_ip = "";
   bool ir_enabled = false;   // MCP IR build + attempted init
-  bool ir_ok = false;        // both MCP23008 responded
-  bool ir_in_ok = false;     // front bumper MCP @0x20
-  bool ir_out_ok = false;    // body MCP @0x21 (aux + wheels)
-  uint8_t ir_inputs = 0;     // GPA0-4 snapshot (bit = HIGH)
-  bool ir_front_hit = false; // recent delta detect (held ~0.5s for display)
+  bool ir_ok = false;        // body MCP23008 responded
+  bool ir_out_ok = false;    // body MCP @0x21
+  uint8_t ir_inputs = 0;     // wheel bits WL=0 WR=1
   bool ir_wheels_on = false;
-  bool ir_front_emit = false;  // front emitter gates enabled (555 carrier on PCB)
-  bool ir_body_aux_emit = false;  // body aux gate LOW (BC557 active-low on)
   uint8_t ir_body_iodir = 0;
   uint8_t ir_body_olat = 0;
   uint8_t ir_body_gpio = 0;
-  uint8_t ir_front_iodir = 0;
-  uint8_t ir_front_olat = 0;
-  uint8_t ir_front_gpio = 0;
   uint8_t ir_i2c_count = 0;
   uint8_t ir_i2c_addrs[8] = {};  // devices seen on last bus scan
   int ir_sda_pin = -1;
@@ -62,6 +55,8 @@ struct RoverUiData {
   bool tof_right_ok = false;
   float tof_left_m = -1.0f;
   float tof_right_m = -1.0f;
+  bool tof_front_ok = false;
+  float tof_front_m = -1.0f;
   const char *boot_reason = nullptr;
   uint32_t boot_reason_until_ms = 0;
 };

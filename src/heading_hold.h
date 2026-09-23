@@ -57,10 +57,10 @@ class HeadingHold {
 #define HEADING_ADJ_MAP_DEG 3.0f
 #endif
 #ifndef HEADING_ADJ_OUT_NORM
-#define HEADING_ADJ_OUT_NORM 0.156f
+#define HEADING_ADJ_OUT_NORM 0.012f
 #endif
 #ifndef HEADING_TRIM_MAX
-#define HEADING_TRIM_MAX 0.156f
+#define HEADING_TRIM_MAX 0.012f
 #endif
 
   static constexpr float BIAS_CAL_S = HEADING_BIAS_CAL_S;

@@ -18,7 +18,7 @@ struct Note {
 };
 
 struct MelodyDef {
-  Note notes[16];
+  Note notes[24];
   uint8_t count;
 };
 
@@ -48,24 +48,29 @@ enum : uint16_t {
   A5 = 880,
 };
 
+// Kernkraft 400 hook from Cain's MIDI (140 BPM, 4/4, PPQ 384).
+// Every melody note is an 8th (192 ticks ≈ 214 ms), not a 16th.
+// Sounding 209 ms + kNoteGapMs 5 ≈ 214 ms so pitch changes still speak.
+// The twist is G–F#–D–E (not G–F#–E–D). hz 0 = rest.
+constexpr uint16_t kE8 = 209;   // eighth @ 140 BPM
+constexpr uint16_t kQ = 424;    // quarter
+constexpr uint16_t kH = 854;    // half (the hole after the pickup)
+
 static const MelodyDef kMelodies[] = {
     {},  // 0 unused
-    // Tempo basis: MIDI was 140 BPM.
-    // 16th note ≈ 107 ms, 8th ≈ 214 ms, quarter ≈ 429 ms.
-    // Keep a tiny gap (kNoteGapMs) but let durations carry the groove.
-    //
-    // ready — longer “release” version (startup connect cue)
-    {{NOTE(B4, 108), NOTE(D5, 108), NOTE(E5, 108), NOTE(Fs5, 108), NOTE(B4, 108), NOTE(D5, 108),
-      NOTE(E5, 108), NOTE(Fs5, 108), NOTE(G5, 216), NOTE(Fs5, 108), NOTE(E5, 108), NOTE(D5, 108),
-      NOTE(B4, 100), NOTE(D5, 100), NOTE(E5, 120), NOTE(G5, 280)},
+    // ready — pickup, 2-beat hole, then the hook (startup connect cue)
+    {{NOTE(B4, kE8), NOTE(D5, kE8), NOTE(E5, kE8), NOTE(Fs5, kE8), NOTE(0, kH), NOTE(B4, kE8),
+      NOTE(D5, kE8), NOTE(E5, kE8), NOTE(Fs5, kE8), NOTE(G5, kE8), NOTE(Fs5, kE8), NOTE(D5, kE8),
+      NOTE(E5, kE8), NOTE(D5, kE8), NOTE(Fs5, kE8), NOTE(B4, kQ)},
      16},
-    // auto start — session start (short hype)
-    {{NOTE(B4, 108), NOTE(D5, 108), NOTE(E5, 108), NOTE(Fs5, 108), NOTE(G5, 216), NOTE(Fs5, 108),
-      NOTE(E5, 108), NOTE(D5, 216)},
+    // auto start — just the hook
+    {{NOTE(B4, kE8), NOTE(D5, kE8), NOTE(E5, kE8), NOTE(Fs5, kE8), NOTE(G5, kE8), NOTE(Fs5, kE8),
+      NOTE(D5, kE8), NOTE(E5, kQ)},
      8},
-    // auto stop — session stop (quick fall + resolve)
-    {{NOTE(G5, 108), NOTE(Fs5, 108), NOTE(E5, 108), NOTE(D5, 216), NOTE(B4, 216), NOTE(A4, 420)},
-     6},
+    // auto stop — reverse the hook
+    {{NOTE(E5, kE8), NOTE(D5, kE8), NOTE(Fs5, kE8), NOTE(G5, kE8), NOTE(Fs5, kE8), NOTE(E5, kE8),
+      NOTE(D5, kE8), NOTE(B4, kQ)},
+     8},
     // bump — restore original “thunk thunk”
     {{NOTE(A3, 55), NOTE(A3, 55), NOTE(E3, 62)}, 3},
     // stall — restore original “stuck”
@@ -187,13 +192,17 @@ void RoverSpeaker::tick(uint32_t now_ms) {
   }
 
   const Note& n = _melody[_note_idx];
+  if (n.hz == 0) {
+    silence_pwm();
+  } else {
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
-  ledcWriteTone(static_cast<uint8_t>(_pin), n.hz);
-  ledcWrite(static_cast<uint8_t>(_pin), static_cast<uint32_t>(kDutyOn * kVol));
+    ledcWriteTone(static_cast<uint8_t>(_pin), n.hz);
+    ledcWrite(static_cast<uint8_t>(_pin), static_cast<uint32_t>(kDutyOn * kVol));
 #else
-  ledcWriteTone(static_cast<uint8_t>(_ch), n.hz);
-  ledcWrite(static_cast<uint8_t>(_ch), static_cast<uint32_t>(kDutyOn * kVol));
+    ledcWriteTone(static_cast<uint8_t>(_ch), n.hz);
+    ledcWrite(static_cast<uint8_t>(_ch), static_cast<uint32_t>(kDutyOn * kVol));
 #endif
+  }
   _note_until_ms = now_ms + n.ms;
   _in_gap = true;
 }

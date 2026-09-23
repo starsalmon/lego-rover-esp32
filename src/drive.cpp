@@ -2,6 +2,14 @@
 
 #include <math.h>
 
+#if defined(ARDUINO_ARCH_ESP32)
+#include <freertos/FreeRTOS.h>
+#include <freertos/portmacro.h>
+namespace {
+portMUX_TYPE g_drive_mux = portMUX_INITIALIZER_UNLOCKED;
+}
+#endif
+
 namespace {
 
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
@@ -79,15 +87,27 @@ void SmoothDrive::set_target(float left, float right) {
   if (left < -1.0f) left = -1.0f;
   if (right > 1.0f) right = 1.0f;
   if (right < -1.0f) right = -1.0f;
+#if defined(ARDUINO_ARCH_ESP32)
+  portENTER_CRITICAL(&g_drive_mux);
+#endif
   _tgt_l = left;
   _tgt_r = right;
+#if defined(ARDUINO_ARCH_ESP32)
+  portEXIT_CRITICAL(&g_drive_mux);
+#endif
 }
 
 void SmoothDrive::tick() {
+#if defined(ARDUINO_ARCH_ESP32)
+  portENTER_CRITICAL(&g_drive_mux);
+#endif
   const uint32_t now = millis();
   float dt = (_last_ms == 0) ? 0.01f : (now - _last_ms) * 0.001f;
   _last_ms = now;
   if (dt <= 0.0f) {
+#if defined(ARDUINO_ARCH_ESP32)
+    portEXIT_CRITICAL(&g_drive_mux);
+#endif
     return;
   }
   // A stalled loop must not dump a huge step into the wheels.
@@ -117,12 +137,23 @@ void SmoothDrive::tick() {
   };
   step(_cur_l, _tgt_l);
   step(_cur_r, _tgt_r);
-  _apply(_cur_l, _cur_r);
+  const float out_l = _cur_l;
+  const float out_r = _cur_r;
+#if defined(ARDUINO_ARCH_ESP32)
+  portEXIT_CRITICAL(&g_drive_mux);
+#endif
+  _apply(out_l, out_r);
 }
 
 void SmoothDrive::hard_stop() {
+#if defined(ARDUINO_ARCH_ESP32)
+  portENTER_CRITICAL(&g_drive_mux);
+#endif
   _tgt_l = _tgt_r = _cur_l = _cur_r = 0;
   _last_ms = millis();
+#if defined(ARDUINO_ARCH_ESP32)
+  portEXIT_CRITICAL(&g_drive_mux);
+#endif
   _apply(0, 0);
 }
 

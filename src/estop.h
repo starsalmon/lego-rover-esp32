@@ -14,7 +14,7 @@ class EStop {
 
  private:
   int _pin = -1;
-  bool _active = false;
+  volatile bool _active = false;
   bool _long_fired = false;
   RoverButtonEvent _pending = kBtnNone;
   uint32_t _press_ms = 0;

@@ -6,13 +6,13 @@ class RoverMcpIr;
 class RoverPca9685;
 class Ultrasonic;
 
-/** Pan sonar: smooth cruise wiggle, publish range, emergency brake only.
- *  Wander / escape lives on the Pi (autonomous_explore.py), not here. */
+/** Pan sonar (aft + sides): cruise sweep, publish range, reverse hard-brake.
+ *  Nose depth is VL53L8CX. Wander / escape lives on dockerhost. */
 class RoverSonar {
  public:
   bool begin(Ultrasonic* sonar, RoverPca9685* pca);
 
-  /** True when hard-braking forward motion (Pi still owns steering). */
+  /** True when hard-braking reverse (brain still owns steering). */
   bool tick(uint32_t now_ms, float cmd_lin, float cmd_ang, bool body_moving, float yaw_deg,
             float* out_lin, float* out_ang);
 
@@ -55,6 +55,8 @@ class RoverSonar {
   /** Cal-sweep dwell model (ms per degree), inferred from bench calibration. */
   void set_cal_ms_per_deg(float ms_per_deg) { _cal_ms_per_deg = ms_per_deg; }
   float cal_ms_per_deg() const { return _cal_ms_per_deg; }
+  void set_side_hint(float left_m, float right_m);
+
   /** Pause cruise wiggle near obstacles — hold pan at center. */
   bool hold_pan_wiggle() const;
 
@@ -83,6 +85,8 @@ class RoverSonar {
   float _last_forward_range_m = -1.0f;
   float _glance_left_m = -1.0f;
   float _glance_right_m = -1.0f;
+  volatile float _hint_left_m = -1.0f;
+  volatile float _hint_right_m = -1.0f;
   bool _braking = false;
   uint32_t _last_read_ms = 0;
   uint32_t _wiggle_t0_ms = 0;

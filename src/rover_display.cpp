@@ -388,6 +388,15 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
     y += kLineH2;
   }
 #endif
+#if defined(ROVER_VL53L8)
+  {
+    g.setTextColor(data.tof_front_ok ? TFT_GREEN : TFT_RED, TFT_BLACK);
+    g.setCursor(kTextX, y);
+    g.print("L8 ");
+    print_range_value(g, data.tof_front_ok ? data.tof_front_m : -1.0f);
+    y += kLineH2;
+  }
+#endif
 
   g.setTextColor(TFT_WHITE, TFT_BLACK);
   g.setCursor(kTextX, y);
@@ -465,77 +474,22 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
 
   if (data.ir_enabled) {
     g.setTextSize(1);
-#if defined(ROVER_UI_IR_DEBUG)
     if (!data.ir_ok) {
       g.setTextColor(TFT_RED, TFT_BLACK);
       g.setCursor(kTextX, y);
-      g.printf("IR FAIL f:%s b:%s", data.ir_in_ok ? "OK" : "--",
-               data.ir_out_ok ? "OK" : "--");
+      g.printf("MCP body --");
+      y += 12;
     } else {
-      g.setTextColor(data.ir_front_hit ? TFT_YELLOW : TFT_GREEN, TFT_BLACK);
-      g.setCursor(kTextX, y);
-      g.printf("IR f:%s b:%s", data.ir_in_ok ? "OK" : "--", data.ir_out_ok ? "OK" : "--");
-      if (data.ir_front_hit) {
-        g.print(" HIT");
-      } else if (data.ir_front_emit) {
-        g.print(" TX");
-      }
-    }
-    y += 12;
-
-    g.setTextColor(TFT_ORANGE, TFT_BLACK);
-    g.setCursor(kTextX, y);
-    g.printf("I2C SDA%d SCL%d", data.ir_sda_pin, data.ir_scl_pin);
-    if (data.ir_i2c_count == 0) {
-      g.print(" --");
-    } else {
-      for (uint8_t i = 0; i < data.ir_i2c_count && i < 8; i++) {
-        g.printf(" %02X", data.ir_i2c_addrs[i]);
-      }
-    }
-    y += 12;
-
-    if (data.ir_ok) {
-      g.setTextColor(TFT_WHITE, TFT_BLACK);
-      g.setCursor(kTextX, y);
-      g.printf("FL%c FR%c", (data.ir_inputs & 0x01) ? '1' : '0',
-               (data.ir_inputs & 0x02) ? '1' : '0');
       g.setTextColor(TFT_DARKGREY, TFT_BLACK);
-      g.printf(" WL%c WR%c AX%c", (data.ir_inputs & 0x04) ? '1' : '0',
-               (data.ir_inputs & 0x08) ? '1' : '0', (data.ir_inputs & 0x10) ? '1' : '0');
+      g.setCursor(kTextX, y);
+      g.printf("WL%c WR%c", (data.ir_inputs & 0x01) ? '1' : '0',
+               (data.ir_inputs & 0x02) ? '1' : '0');
       if (data.ir_wheels_on) {
         g.setTextColor(TFT_CYAN, TFT_BLACK);
         g.print(" Whl");
       }
-      if (data.ir_body_aux_emit) {
-        g.setTextColor(TFT_YELLOW, TFT_BLACK);
-        g.print(" aTX");
-      }
-      g.setTextColor(TFT_DARKGREY, TFT_BLACK);
-      g.printf(" bD:%02X L:%02X P:%02X", data.ir_body_iodir, data.ir_body_olat,
-               data.ir_body_gpio);
-      if (!data.ir_front_emit && data.ir_in_ok) {
-        y += 12;
-        g.setTextColor(TFT_ORANGE, TFT_BLACK);
-        g.setCursor(kTextX, y);
-        g.printf("MCP D:%02X L:%02X P:%02X", data.ir_front_iodir, data.ir_front_olat,
-                 data.ir_front_gpio);
-      }
-    }
-#else
-    if (!data.ir_ok) {
-      g.setTextColor(TFT_RED, TFT_BLACK);
-      g.setCursor(kTextX, y);
-      g.printf("IR fault f:%s b:%s", data.ir_in_ok ? "OK" : "--",
-               data.ir_out_ok ? "OK" : "--");
-      y += 12;
-    } else if (data.ir_front_hit) {
-      g.setTextColor(TFT_YELLOW, TFT_BLACK);
-      g.setCursor(kTextX, y);
-      g.print("IR bumper HIT");
       y += 12;
     }
-#endif
     g.setTextSize(2);
   }
 }
@@ -699,18 +653,11 @@ bool RoverDisplay::_changed(const RoverUiData &data) const {
   if (!feq(data.cmd_lin, _last.cmd_lin) || !feq(data.cmd_ang, _last.cmd_ang)) return true;
   if (!feq(data.motor_l, _last.motor_l) || !feq(data.motor_r, _last.motor_r)) return true;
   if (data.ir_enabled != _last.ir_enabled || data.ir_ok != _last.ir_ok) return true;
-  if (data.ir_in_ok != _last.ir_in_ok || data.ir_out_ok != _last.ir_out_ok) return true;
+  if (data.ir_out_ok != _last.ir_out_ok) return true;
   if (data.ir_inputs != _last.ir_inputs) return true;
-  if (data.ir_front_hit != _last.ir_front_hit) return true;
   if (data.ir_wheels_on != _last.ir_wheels_on) return true;
-  if (data.ir_front_emit != _last.ir_front_emit) return true;
-  if (data.ir_body_aux_emit != _last.ir_body_aux_emit) return true;
   if (data.ir_body_iodir != _last.ir_body_iodir || data.ir_body_olat != _last.ir_body_olat ||
       data.ir_body_gpio != _last.ir_body_gpio) {
-    return true;
-  }
-  if (data.ir_front_iodir != _last.ir_front_iodir || data.ir_front_olat != _last.ir_front_olat ||
-      data.ir_front_gpio != _last.ir_front_gpio) {
     return true;
   }
   if (data.ir_i2c_count != _last.ir_i2c_count) return true;
@@ -729,6 +676,8 @@ bool RoverDisplay::_changed(const RoverUiData &data) const {
 #endif
   if (fabsf(data.tof_left_m - _last.tof_left_m) >= 0.01f) return true;
   if (fabsf(data.tof_right_m - _last.tof_right_m) >= 0.01f) return true;
+  if (data.tof_front_ok != _last.tof_front_ok) return true;
+  if (fabsf(data.tof_front_m - _last.tof_front_m) >= 0.02f) return true;
   if (data.sonar_cal_snap_count != _last.sonar_cal_snap_count) return true;
   if (data.sonar_cal_summary_until_ms > 0 &&
       (data.sonar_cal_summary_until_ms > 0) != (_last.sonar_cal_summary_until_ms > 0)) {

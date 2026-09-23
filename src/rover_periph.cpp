@@ -13,6 +13,7 @@ bool RoverPeriph::begin(int speaker_pin, int ring_pin) {
     _sonar_bins[i] = 255;
     _ir_bins[i] = 255;
     _tof_bins[i] = 255;
+    _l8_bins[i] = 255;
   }
   _ring.set_mode(kRingStandby);
   if (spk || ring) {
@@ -106,8 +107,13 @@ int RoverPeriph::bearing_to_led(float bearing_deg) {
 }
 
 int RoverPeriph::sonar_pan_to_led(float pan_deg) {
-  const float bearing = fmodf(static_cast<float>(SONAR_PAN_CENTER_DEG) - pan_deg + 360.0f, 360.0f);
-  return bearing_to_led(bearing);
+  // LED follows the horn. SONAR_PAN_INVERT swaps 0↔180 on the servo, so
+  // paint the inverted angle or the blob sits opposite the head.
+  float p = pan_deg;
+#if SONAR_PAN_INVERT
+  p = 2.0f * static_cast<float>(SONAR_PAN_CENTER_DEG) - pan_deg;
+#endif
+  return rear_pan_to_led(p);
 }
 
 int RoverPeriph::rear_pan_to_led(float pan_deg) {
@@ -116,6 +122,49 @@ int RoverPeriph::rear_pan_to_led(float pan_deg) {
   const float bearing =
       fmodf(static_cast<float>(SONAR_PAN_CENTER_DEG) - pan_deg + 180.0f + 360.0f, 360.0f);
   return bearing_to_led(bearing);
+}
+
+void RoverPeriph::note_l8_cols(uint32_t now_ms, const float* cols, uint8_t n) {
+  if (!cols || n < 8) {
+    return;
+  }
+  // Front half of the 8-LED ring, left → right: +45°, 0°, 315°, 270°.
+  // L8 FOV is ~45°; we stretch it across the front 180° so empty vs wall is obvious.
+  const int leds[4] = {
+      bearing_to_led(45.0f),
+      bearing_to_led(0.0f),
+      bearing_to_led(315.0f),
+      bearing_to_led(270.0f),
+  };
+  for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
+    _l8_bins[i] = 255;
+  }
+  bool any = false;
+  for (uint8_t b = 0; b < 4; b++) {
+    const float a = cols[b * 2];
+    const float c = cols[b * 2 + 1];
+    float m = -1.0f;
+    if (a > 0.0f) {
+      m = a;
+    }
+    if (c > 0.0f) {
+      m = (m < 0.0f) ? c : fminf(m, c);
+    }
+    const int led = leds[b];
+    if (led < 0 || led >= ROVER_RING_COUNT) {
+      continue;
+    }
+    if (m > 0.0f) {
+      _l8_bins[led] = sonar_m_to_cm(m);
+      any = true;
+    }
+  }
+  if (any) {
+    _l8_hold_until_ms = now_ms + 400;
+  } else {
+    // No targets: still a reading. Front LEDs go dark so "empty L8" is visible.
+    _l8_hold_until_ms = now_ms + 400;
+  }
 }
 
 void RoverPeriph::tick_ir_map(uint32_t now_ms, bool front_l, bool front_r) {
@@ -249,6 +298,22 @@ void RoverPeriph::tick_sonar_map(uint32_t now_ms, float pan_deg, float range_m, 
   for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
     if (_ir_bins[i] < 255) {
       frame[i] = _ir_bins[i];
+    }
+  }
+  // L8 nose: front half of the ring (left→right 45°, 0°, 315°, 270°).
+  // 255 = no target (open space or failed zone) — leave that LED dark.
+  if (now_ms <= _l8_hold_until_ms) {
+    const int l8leds[4] = {
+        bearing_to_led(45.0f),
+        bearing_to_led(0.0f),
+        bearing_to_led(315.0f),
+        bearing_to_led(270.0f),
+    };
+    for (uint8_t b = 0; b < 4; b++) {
+      const int led = l8leds[b];
+      if (led >= 0 && led < ROVER_RING_COUNT) {
+        frame[led] = _l8_bins[led];
+      }
     }
   }
 

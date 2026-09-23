@@ -8,31 +8,27 @@
 namespace {
 
 constexpr uint8_t kRegIodir = 0x00;
-constexpr uint8_t kRegOlat = 0x0A;  // MCP23008 OLAT — NOT 0x05 (that is IOCON)
+constexpr uint8_t kRegOlat = 0x0A;
 constexpr uint8_t kRegGpio = 0x09;
 
-// Front @ 0x20: GPA0-1 in, GPA2-3 out (BC547 gates), GPA4-7 spare inputs.
-constexpr uint8_t kFrontIodir = 0xF3;
-// Body @ 0x21 — GPA0-2 Schmitt INPUTS, GPA3-5 BC557 emitter OUTPUTS, GPA6-7 VL53 XSHUT.
-// MCP IODIR: 1=input. GPA3-7 are outputs; GPA0-2 stay input.
 constexpr uint8_t kBodySchmittInMask =
-    static_cast<uint8_t>((1u << BODY_IN_AUX) | (1u << BODY_IN_WHEEL_L) |
+    static_cast<uint8_t>((1u << BODY_IN_SPARE) | (1u << BODY_IN_WHEEL_L) |
                          (1u << BODY_IN_WHEEL_R));
 constexpr uint8_t kBodyEmitterOutMask =
-    static_cast<uint8_t>((1u << BODY_OUT_AUX) | (1u << BODY_OUT_WHEEL_L) |
-                         (1u << BODY_OUT_WHEEL_R));
+    static_cast<uint8_t>((1u << BODY_OUT_WHEEL_L) | (1u << BODY_OUT_WHEEL_R));
 constexpr uint8_t kBodyVl53OutMask =
-    static_cast<uint8_t>((1u << BODY_OUT_VL53_L) | (1u << BODY_OUT_VL53_R));
+    static_cast<uint8_t>((1u << BODY_OUT_VL53_L8) | (1u << BODY_OUT_VL53_L) |
+                         (1u << BODY_OUT_VL53_R));
 constexpr uint8_t kBodyAllOutMask =
     static_cast<uint8_t>(kBodyEmitterOutMask | kBodyVl53OutMask);
 constexpr uint8_t kBodyIodir =
     static_cast<uint8_t>(0xFFu & static_cast<uint8_t>(~kBodyAllOutMask));
-static_assert(BODY_IN_AUX == 0 && BODY_IN_WHEEL_L == 1 && BODY_IN_WHEEL_R == 2);
-static_assert(BODY_OUT_AUX == 3 && BODY_OUT_WHEEL_L == 4 && BODY_OUT_WHEEL_R == 5);
+static_assert(BODY_IN_SPARE == 0 && BODY_IN_WHEEL_L == 1 && BODY_IN_WHEEL_R == 2);
+static_assert(BODY_OUT_VL53_L8 == 3 && BODY_OUT_WHEEL_L == 4 && BODY_OUT_WHEEL_R == 5);
 static_assert(BODY_OUT_VL53_L == 6 && BODY_OUT_VL53_R == 7);
 static_assert(kBodySchmittInMask == 0x07, "GPA0-2 inputs");
-static_assert(kBodyEmitterOutMask == 0x38, "GPA3-5 PNP emitter outputs");
-static_assert(kBodyVl53OutMask == 0xC0, "GPA6-7 VL53 XSHUT outputs");
+static_assert(kBodyEmitterOutMask == 0x30, "GPA4-5 PNP wheel emitters");
+static_assert(kBodyVl53OutMask == 0xC8, "GPA3 L8 LPn + GPA6-7 XSHUT");
 static_assert(kBodyIodir == 0x07, "IODIR: in 0-2, out 3-7");
 
 }  // namespace
@@ -82,7 +78,6 @@ bool Mcp23008::configureIo(uint8_t iodir, uint8_t olat) {
   if (!_addr) return false;
   _iodir = iodir;
   _olat = olat;
-  // Set latch before direction so outputs do not glitch low when enabled.
   if (!writeReg(kRegOlat, _olat)) return false;
   return writeReg(kRegIodir, _iodir);
 }
@@ -110,27 +105,16 @@ bool Mcp23008::readPin(uint8_t pin) const {
   return (gpio & (1u << pin)) != 0;
 }
 
-bool RoverMcpIr::beginFront() {
-  if (!_front.ok()) {
-    if (!_front.begin(MCP_FRONT_ADDR)) return false;
-    if (!_front.configureIo(kFrontIodir, 0x00)) return false;
-  }
-  setFrontEmitters(true);
-  return true;
-}
-
 bool RoverMcpIr::beginBody() {
   if (!_body.ok()) {
     if (!_body.begin(MCP_BODY_ADDR)) return false;
-    // Emitters off (GPA3-5 high); VL53 XSHUT low; never latch-low GPA0-2 Schmitt inputs.
     _body_out_shadow =
-        static_cast<uint8_t>(kBodyPnpLowMask | kBodySchmittInMask);  // 0x3F
+        static_cast<uint8_t>(kBodyPnpLowMask | kBodySchmittInMask);
     if (!_body.configureIo(kBodyIodir, _body_out_shadow)) return false;
   }
-  // Wheel IR always on (odometer); aux off until sample_aux() pulses it.
   setBodyEmitter(BODY_OUT_WHEEL_L, true);
   setBodyEmitter(BODY_OUT_WHEEL_R, true);
-  setBodyEmitter(BODY_OUT_AUX, false);
+  set_vl53l8_lpn(false);
   applyBodyOutputs();
   _wheels_on = true;
   return true;
@@ -139,54 +123,13 @@ bool RoverMcpIr::beginBody() {
 bool RoverMcpIr::begin(int sda, int scl) {
   rover_i2c_begin(sda, scl);
   delay(50);
-
-  const bool front = beginFront();
-  const bool body = beginBody();
-  return front || body;
-}
-
-void RoverMcpIr::applyFrontOutputs() {
-  if (!_front.ok()) return;
-  _front.configureIo(kFrontIodir, _front_out_shadow);
+  return beginBody();
 }
 
 void RoverMcpIr::applyBodyOutputs() {
   if (!_body.ok()) return;
-  // OLAT bits 0-2 are inputs — keep them high; only GPA3-5 drive emitters.
   _body_out_shadow |= kBodySchmittInMask;
   _body.configureIo(kBodyIodir, _body_out_shadow);
-}
-
-void RoverMcpIr::readFrontIoState(uint8_t &iodir, uint8_t &olat, uint8_t &gpio) const {
-  iodir = 0;
-  olat = 0;
-  gpio = 0;
-  if (!_front.ok()) return;
-  _front.readIoState(iodir, olat, gpio);
-}
-
-bool RoverMcpIr::front_emitting() const {
-  if (!_front.ok() || !_front_emitters_on) return false;
-  uint8_t iodir = 0;
-  uint8_t olat = 0;
-  uint8_t gpio = 0;
-  if (!_front.readIoState(iodir, olat, gpio)) return false;
-  const uint8_t out_mask =
-      static_cast<uint8_t>((1u << FRONT_OUT_L) | (1u << FRONT_OUT_R));
-  if ((iodir & out_mask) != 0) return false;
-  return (gpio & out_mask) == out_mask;
-}
-
-bool RoverMcpIr::body_aux_emitting() const {
-  if (!_body.ok()) return false;
-  uint8_t iodir = 0;
-  uint8_t olat = 0;
-  uint8_t gpio = 0;
-  if (!_body.readIoState(iodir, olat, gpio)) return false;
-  const uint8_t mask = static_cast<uint8_t>(1u << BODY_OUT_AUX);
-  if ((iodir & mask) != 0) return false;
-  // PNP / active-low gate: MCP pin LOW = emitter on.
-  return (gpio & mask) == 0;
 }
 
 void RoverMcpIr::readBodyIoState(uint8_t &iodir, uint8_t &olat, uint8_t &gpio) const {
@@ -210,65 +153,21 @@ void RoverMcpIr::logBodyIoState() const {
     return;
   }
   Serial.printf(
-      "MCP body @0x%02x: IODIR=0x%02x OLAT=0x%02x GPIO=0x%02x want IODIR=0x%02x OLAT=0x%02x (aux "
-      "BC557 PNP-low)\n",
+      "MCP body @0x%02x: IODIR=0x%02x OLAT=0x%02x GPIO=0x%02x want IODIR=0x%02x OLAT=0x%02x "
+      "(GPA3=L8 LPn, GPA4-5 PNP wheels)\n",
       _body.addr(), iodir, olat, gpio, kBodyIodir, static_cast<unsigned>(_body_out_shadow));
-}
-
-void RoverMcpIr::logFrontIoState() const {
-  if (!_front.ok()) {
-    Serial.println("MCP front: not present");
-    return;
-  }
-  uint8_t iodir = 0;
-  uint8_t olat = 0;
-  uint8_t gpio = 0;
-  if (!_front.readIoState(iodir, olat, gpio)) {
-    Serial.printf("MCP front @0x%02x: readback failed\n", _front.addr());
-    return;
-  }
-  Serial.printf("MCP front @0x%02x: IODIR=0x%02x OLAT=0x%02x GPIO=0x%02x want IODIR=0x%02x OLAT=0x%02x\n",
-                _front.addr(), iodir, olat, gpio, kFrontIodir,
-                static_cast<unsigned>(_front_out_shadow));
-}
-
-void RoverMcpIr::setFrontEmitters(bool on) {
-  if (!_front.ok()) return;
-  _front_emitters_on = on;
-  if (on) {
-    _front_out_shadow |= static_cast<uint8_t>((1u << FRONT_OUT_L) | (1u << FRONT_OUT_R));
-  } else {
-    _front_out_shadow &= static_cast<uint8_t>(~((1u << FRONT_OUT_L) | (1u << FRONT_OUT_R)));
-  }
-  applyFrontOutputs();
 }
 
 void RoverMcpIr::setBodyEmitter(uint8_t pin, bool emitter_on) {
   if (!_body.ok() || pin > 7) return;
   if ((kBodyPnpLowMask & (1u << pin)) == 0) return;
-  const bool pin_high = !emitter_on;  // BC557 PNP: MCP low = emitter on
+  const bool pin_high = !emitter_on;
   if (pin_high) {
     _body_out_shadow |= static_cast<uint8_t>(1u << pin);
   } else {
     _body_out_shadow &= static_cast<uint8_t>(~(1u << pin));
   }
   _body_out_shadow |= kBodySchmittInMask;
-}
-
-void RoverMcpIr::setAllBodyEmitters(bool on) {
-  if (!_body.ok()) return;
-  if (on) {
-    // GPA3-5 low (emitters on), GPA0-2 untouched in latch (stay high).
-    _body_out_shadow = kBodySchmittInMask;  // 0x07
-  } else {
-    _body_out_shadow =
-        static_cast<uint8_t>(kBodySchmittInMask | kBodyPnpLowMask);  // 0x3F
-  }
-  applyBodyOutputs();
-}
-
-bool RoverMcpIr::readFrontInput(uint8_t pin) const {
-  return _front.readPin(pin);
 }
 
 bool RoverMcpIr::readBodyInput(uint8_t pin) const {
@@ -278,7 +177,6 @@ bool RoverMcpIr::readBodyInput(uint8_t pin) const {
 void RoverMcpIr::set_wheels_enabled(bool on) {
   if (!_body.ok()) return;
   _wheels_on = on;
-  // Keep wheel emitters on — pulsing them breaks tick counting.
   setBodyEmitter(BODY_OUT_WHEEL_L, true);
   setBodyEmitter(BODY_OUT_WHEEL_R, true);
   applyBodyOutputs();
@@ -286,32 +184,15 @@ void RoverMcpIr::set_wheels_enabled(bool on) {
 
 uint8_t RoverMcpIr::read_inputs() const {
   uint8_t mask = 0;
-  if (_front.ok()) {
-    if (readFrontInput(FRONT_IN_L)) mask |= 0x01;
-    if (readFrontInput(FRONT_IN_R)) mask |= 0x02;
-  }
   if (_body.ok()) {
-    if (readBodyInput(BODY_IN_WHEEL_L)) mask |= 0x04;
-    if (readBodyInput(BODY_IN_WHEEL_R)) mask |= 0x08;
-    if (readBodyInput(BODY_IN_AUX)) mask |= 0x10;
+    if (readBodyInput(BODY_IN_WHEEL_L)) mask |= 0x01;
+    if (readBodyInput(BODY_IN_WHEEL_R)) mask |= 0x02;
   }
   return mask;
 }
 
 void RoverMcpIr::tick(uint32_t now_ms) {
-  if (_front.ok()) {
-    static uint32_t last_sample_ms = 0;
-    if (now_ms - last_sample_ms >= 250) {
-      last_sample_ms = now_ms;
-      bool off_hit = false;
-      bool on_hit = false;
-      sample_front(MCP_IR_FRONT_SAMPLE_OFF_MS, MCP_IR_FRONT_SAMPLE_ON_MS, off_hit, on_hit);
-    }
-  } else {
-    _front_hit_l = false;
-    _front_hit_r = false;
-  }
-
+  (void)now_ms;
   if (!_body.ok()) return;
 
   const bool wl = readBodyInput(BODY_IN_WHEEL_L);
@@ -324,43 +205,6 @@ void RoverMcpIr::tick(uint32_t now_ms) {
   }
   _wheel_l_prev = wl;
   _wheel_r_prev = wr;
-
-  // Aux should be off between samples; wheels stay on.
-  if (body_aux_emitting()) {
-    setBodyEmitter(BODY_OUT_AUX, false);
-    applyBodyOutputs();
-  }
-}
-
-void RoverMcpIr::sample_front(uint16_t off_ms, uint16_t on_ms, bool &off_hit, bool &on_hit) {
-  off_hit = false;
-  on_hit = false;
-  _front_hit_l = false;
-  _front_hit_r = false;
-  if (!_front.ok()) return;
-
-  setFrontEmitters(false);
-  delay(off_ms);
-  const bool off_l = readFrontInput(FRONT_IN_L);
-  const bool off_r = readFrontInput(FRONT_IN_R);
-  off_hit = off_l || off_r;
-
-  setFrontEmitters(true);
-  delay(on_ms);
-  const bool on_l = readFrontInput(FRONT_IN_L);
-  const bool on_r = readFrontInput(FRONT_IN_R);
-  on_hit = on_l || on_r;
-
-  // Reflective bumper — trust delta (on & !off), not ambient / stray 38 kHz.
-  _front_hit_l = on_l && !off_l;
-  _front_hit_r = on_r && !off_r;
-}
-
-bool RoverMcpIr::rear_obstacle() {
-  bool off_hit = false;
-  bool on_hit = false;
-  sample_aux(MCP_IR_AUX_OFF_MS, MCP_IR_AUX_ON_MS, off_hit, on_hit);
-  return on_hit && !off_hit;
 }
 
 void RoverMcpIr::set_vl53_xshut(bool left_on, bool right_on) {
@@ -378,26 +222,18 @@ void RoverMcpIr::set_vl53_xshut(bool left_on, bool right_on) {
   applyBodyOutputs();
 }
 
-void RoverMcpIr::sample_aux(uint16_t off_ms, uint16_t on_ms, bool &off_hit, bool &on_hit) {
-  off_hit = false;
-  on_hit = false;
+void RoverMcpIr::set_vl53l8_lpn(bool on) {
   if (!_body.ok()) return;
-
-  setBodyEmitter(BODY_OUT_AUX, false);
-  applyBodyOutputs();
-  delay(off_ms);
-  off_hit = readBodyInput(BODY_IN_AUX);
-
-  setBodyEmitter(BODY_OUT_AUX, true);
-  applyBodyOutputs();
-  delay(on_ms);
-  on_hit = readBodyInput(BODY_IN_AUX);
-
-  setBodyEmitter(BODY_OUT_AUX, false);
+  if (on) {
+    _body_out_shadow |= static_cast<uint8_t>(1u << BODY_OUT_VL53_L8);
+  } else {
+    _body_out_shadow &= static_cast<uint8_t>(~(1u << BODY_OUT_VL53_L8));
+  }
   applyBodyOutputs();
 }
 
 I2cScanResult scanI2cBus() {
+  RoverI2cGuard guard;
   I2cScanResult result;
   for (uint8_t addr = 0x08; addr <= 0x77 && result.count < 8; addr++) {
     Wire.beginTransmission(addr);

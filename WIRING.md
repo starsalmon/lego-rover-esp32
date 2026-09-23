@@ -84,11 +84,11 @@ One daisy-chained bus — **3.3 V only**, **4.7 kΩ** pull-ups on SDA/SCL once p
 | Device | Address | Role |
 |--------|---------|------|
 | MPU6050 | **0x68** | IMU — flat on chassis, Z up |
-| MCP23008 “front” | **0x20** | Front bumper IR (ribbon PCB) |
-| MCP23008 “body” | **0x21** | Aux + wheel IR |
-| PCA9685 | **0x40** | Pan sonar servo **ch 15**, aux head servo **ch 0** |
+| MCP23008 | **0x21** | Wheel IR + side ToF XSHUT + VL53L8CX LPn |
+| PCA9685 | **0x40** | Rear pan sonar servo **ch 0** |
 | VL53L1X left | **0x30** | Side ToF — XSHUT → body MCP **GPA6** |
 | VL53L1X right | **0x31** | Side ToF — XSHUT → body MCP **GPA7** |
+| VL53L8CX front | **0x29** | 8×8 nose ToF — LPn → body MCP **GPA3** |
 
 ### VL53L1X side ToF (hallway wall-follow)
 
@@ -108,6 +108,22 @@ Two **VL53L1X** breakouts on the same bus as MPU/MCP/PCA. Default address is **0
 
 Mount left/right pointing sideways (~90° from forward). Brain: `ROVER_MODE=hallway`, tap **Go** — holds **10 cm** (`HALLWAY_TARGET_M=0.10`).
 
+### VL53L8CX front 8×8 (SLAM / nose depth)
+
+Red 9-pin breakout. **L8** plastic shroud on the chip. Same I2C bus. Default **0x29** — firmware holds **LPn low** until side L1X addresses are set, then raises GPA3.
+
+| Pad | Connect |
+|-----|---------|
+| VIN | 3.3 V |
+| GND | GND |
+| SDA / MOSI | GPIO **43** |
+| SCL / CLK | GPIO **44** |
+| SPI_I2C_N | **GND** |
+| NCS | **GND** |
+| MISO | open |
+| INT | open |
+| **LPn** | Body MCP **GPA3** — MCP pad **only**, not through the old aux BC557 |
+
 ### MPU6050
 
 | MPU6050 | ESP |
@@ -119,48 +135,38 @@ Mount left/right pointing sideways (~90° from forward). Brain: `ROVER_MODE=hall
 
 Heading hold uses **gyro Z**. Boot log `MPU at rest: …` — **|az| ≈ 1g** if Z points up.
 
-### Front bumper MCP @ **0x20** (A2 A1 A0 = GND GND GND)
-
-| GPA | Dir | Signal |
-|-----|-----|--------|
-| **0** | in | Front left detect ← LM358 |
-| **1** | in | Front right detect ← LM358 |
-| **2** | out | Front left emitter gate → BC547 (**steady ON**; 555 on bumper modulates) |
-| **3** | out | Front right emitter gate → BC547 (**steady ON**) |
-
 ### Body MCP @ **0x21** (A2 A1 A0 = GND GND **3.3 V**)
 
 | GPA | Dir | Signal |
 |-----|-----|--------|
-| **0** | in | Aux detect ← Schmitt |
+| **0** | in | unused |
 | **1** | in | Wheel left detect |
 | **2** | in | Wheel right detect |
-| **3** | out | Aux emitter (GPIO pulse) |
+| **3** | out | **VL53L8CX LPn** (HIGH = awake) |
 | **4** | out | Wheel left emitter |
 | **5** | out | Wheel right emitter |
 | **6** | out | Left VL53L XSHUT (HIGH = on) |
 | **7** | out | Right VL53L XSHUT (HIGH = on) |
 
-Pi uses `ROVER_IR_SOURCE=esp` — no Pi GPIO for IR.
-
-### PCA9685 @ **0x40** — servos
+### PCA9685 @ **0x40** — rear pan servo
 
 | Channel | Silkscreen | Role |
 |---------|------------|------|
-| **0** | OUT1 | Aux head servo (rear radar aim) — SIG / V+ / GND on header |
-| **15** | OUT16 | **Pan sonar** bracket servo — sweeps HC-SR04 left/right |
+| **0** | OUT1 | **Pan sonar** — HC-SR04 on the tail. **90° = aft**. |
 
-OE: tie **LOW** on module or wire per your board (legacy Pi GPIO24 OE only if PCA was on Pi).
+OE: tie **LOW** on the module.
 
-Servo power: **5 V** from PCA V+ rail (separate BEC OK). Signal is 3.3 V logic from ESP via PCA.
+Servo power: **5 V** from PCA V+ rail. Signal is 3.3 V logic from ESP via PCA.
 
-Firmware pan: **0°–180°** logical sweep, centre **90°** (`SONAR_PAN_CENTER_DEG`). Trim/invert: `SONAR_PAN_TRIM_DEG`, `SONAR_PAN_INVERT` in `rover_pins_s3.h`.
+Firmware pan: **0°–180°** logical sweep, centre **90° = behind the rover**. `SONAR_PAN_INVERT=1` after the 180° rotate. Trim: `SONAR_PAN_TRIM_DEG`.
 
 ---
 
-## Pan sonar (HC-SR04 + servo)
+## Pan sonar (HC-SR04 + servo) — rear / sides
 
-Ultrasonic on a pan bracket — ESP reads range and drives escape. **Standalone brain** (`standalone_main.cpp`); not Pi GPIO.
+Ultrasonic on the **old front pan bracket**, rotated 180° onto the tail. Nose ranging is VL53L8CX. ESP **hard-brakes reverse** only; brain owns wander.
+
+Logical pan: **0° right, 90° aft, 180° left**. Cruise wiggle ±70° around aft.
 
 ### HC-SR04 → T-Display-S3
 
@@ -177,7 +183,7 @@ Typical divider: ECHO → **20 kΩ** → GPIO12 → **10 kΩ** → GND (ratio �
 
 | Servo wire | PCA9685 |
 |------------|---------|
-| Signal (orange/yellow) | **Channel 15** (OUT16) |
+| Signal (orange/yellow) | **Channel 0** (OUT1) |
 | V+ (red) | V+ terminal (5 V) |
 | GND (brown/black) | GND |
 
@@ -189,9 +195,9 @@ Mount: servo horn centres the bracket at **90°**; firmware sweeps full **0° / 
 |----------|---------|---------|
 | `SONAR_TRIG_PIN` | 11 | Trigger |
 | `SONAR_ECHO_PIN` | 12 | Echo (shifted) |
-| `SONAR_SERVO_CHANNEL` | 15 | PCA channel |
+| `SONAR_SERVO_CHANNEL` | 0 | PCA channel |
 | `SONAR_PAN_MIN_DEG` / `MAX` | 0 / 180 | Full sweep endpoints |
-| `SONAR_PAN_CENTER_DEG` | 90 | Centre (forward) |
+| `SONAR_PAN_CENTER_DEG` | 90 | Centre (aft) |
 | `ROVER_BOOT_PAN_SWEEP` | 0 | Boot pan left/right sweep (1 = bench; 0 = quiet center only) |
 | `SONAR_BOOT_PAN_MS` | 280 | Boot left/right/center dwell when sweep enabled |
 
@@ -347,9 +353,9 @@ IR via MCP23008 and PCA9685 wiring is the same logical layout on the shared I2C 
 
 ## Deprecated / not used
 
-- **74HC595 / 74HC165** shift-register IR — replaced by MCP23008.
-- **Single-breadboard MCP layout** (all inputs @0x20, all outputs @0x21 at matching GPA) — superseded by **front @0x20 + body @0x21** split above.
-- **Pi GPIO IR** (6, 22, 26, 27) — use when `ROVER_IR_SOURCE=pi` only.
+- **Front bumper MCP @ 0x20** — disconnected; nose is VL53L8CX.
+- **74HC595 / 74HC165** shift-register IR — replaced by body MCP23008.
+- **Pi GPIO IR** (6, 22, 26, 27) — not in the production path.
 
 ---
 

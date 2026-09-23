@@ -61,13 +61,7 @@ static IrTx ir_beacon;
 static Ultrasonic sonar;
 static RoverSonar rover_sonar;
 
-#ifndef FRONT_IR_WALL_MS
-#define FRONT_IR_WALL_MS 3000
-#endif
-
 static uint32_t stall_block_until = 0;
-static uint32_t front_ir_wall_since = 0;
-static uint32_t front_ir_wall_cooldown_until = 0;
 static bool local_session = false;
 static float last_lin = 0.0f;
 static float last_ang = 0.0f;
@@ -411,29 +405,6 @@ static bool tick_boot_spin_trick(uint32_t now) {
 }
 #endif
 
-static void tick_reverse_rear_ir(uint32_t now) {
-  static uint32_t last_check_ms = 0;
-  if (sonar_drive_lin > -0.04f) {
-    last_check_ms = 0;
-    return;
-  }
-  if (!mcp_ir.body_ok()) {
-    return;
-  }
-  if (last_check_ms != 0 && (now - last_check_ms) < 130) {
-    return;
-  }
-  last_check_ms = now;
-  if (mcp_ir.rear_obstacle()) {
-    Serial.println("EVENT rear IR — reverse blocked");
-    ui.bump = true;
-    pi_periph.notify_bump();
-    rover_sonar.abort_escape(now);
-    sonar_drive_lin = 0.0f;
-    sonar_drive_ang = 0.0f;
-    sonar_drive_override = false;
-    drv.stop();
-  }
 }
 
 static void toggle_session(uint32_t now) {
@@ -448,8 +419,6 @@ static void toggle_session(uint32_t now) {
   } else {
     force_stop("session stop");
     reset_sonar_ring();
-    front_ir_wall_since = 0;
-    front_ir_wall_cooldown_until = 0;
     pi_periph.notify_session(false);
     Serial.println("SESSION stop");
   }
@@ -544,7 +513,7 @@ void setup() {
   battery.begin(PIN_BAT_ADC, BAT_ADC_SCALE, BAT_VOLT_LOW, BAT_VOLT_CRITICAL);
   mcp_ir.begin(MPU_SDA, MPU_SCL);
   if (pca9685.begin(PCA9685_ADDR)) {
-    pca9685.setAngle(ROVER_AUX_SERVO_CHANNEL, 90.0f, 0.0f, 180.0f, 500, 2500);
+    // Pan sonar is commanded by RoverSonar on PCA ch 0.
   }
   if (sonar.begin(SONAR_TRIG_PIN, SONAR_ECHO_PIN)) {
     rover_sonar.begin(&sonar, pca9685.ok() ? &pca9685 : nullptr);
@@ -659,35 +628,7 @@ void loop() {
   }
 
   if (local_session) {
-    tick_reverse_rear_ir(now);
     tick_sonar_ring(now);
-
-    if (mcp_ir.front_ok() && now >= front_ir_wall_cooldown_until) {
-      const float motor_l =
-          fmaxf(fabsf(drv.tgt_left()), fabsf(drv.cur_left()));
-      const float motor_r =
-          fmaxf(fabsf(drv.tgt_right()), fabsf(drv.cur_right()));
-      const bool driving_fwd =
-          fmaxf(motor_l, motor_r) > 0.10f && drv.tgt_left() * drv.tgt_right() >= 0.0f;
-      if (mcp_ir.front_hit() && driving_fwd) {
-        if (front_ir_wall_since == 0) {
-          front_ir_wall_since = now;
-        } else if (now - front_ir_wall_since >= FRONT_IR_WALL_MS) {
-          Serial.println("EVENT front IR wall — sustained");
-          ui.bump = true;
-          pi_periph.notify_bump();
-          if (!rover_sonar.avoid_active()) {
-            rover_sonar.trigger_escape(now);
-          }
-          front_ir_wall_since = 0;
-          front_ir_wall_cooldown_until = now + 6000;
-        }
-      } else {
-        front_ir_wall_since = 0;
-      }
-    } else if (!mcp_ir.front_hit()) {
-      front_ir_wall_since = 0;
-    }
   }
 
   apply_drive(yaw_rate, dt);

@@ -8,10 +8,6 @@
 #define PCA9685_ADDR 0x40
 #endif
 
-#ifndef ROVER_SERVO_CHANNEL
-#define ROVER_SERVO_CHANNEL 0
-#endif
-
 class RoverPca9685 {
  public:
   bool begin(uint8_t addr = PCA9685_ADDR);

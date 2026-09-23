@@ -66,72 +66,33 @@
 #define PI_PERIPH_BAUD 115200
 #endif
 
-// ── MCP23008 split layout ────────────────────────────────────────────────
-// Front bumper PCB (ribbon to ESP I2C bus): one MCP, mixed inputs + outputs.
-// ESP breadboard: second MCP for aux + wheel channels.
-//
-// Strap A2 A1 A0 → address (all GND except A0 on second chip is common pattern):
-//   Front board MCP: 0x20 (000)
-//   Body board MCP:  0x21 (001) — A0 → 3.3 V
-
-#ifndef MCP_FRONT_ADDR
-#define MCP_FRONT_ADDR 0x20
-#endif
+// Body MCP23008 @ 0x21 (A0 → 3.3 V). Wheel IR + ToF enables.
 #ifndef MCP_BODY_ADDR
 #define MCP_BODY_ADDR 0x21
 #endif
 
-// Front bumper MCP @ MCP_FRONT_ADDR — LM358 outs + BC547 emitter gates
-#ifndef FRONT_IN_L
-#define FRONT_IN_L 0   // GPA0 ← LM358 ch A OUT
-#define FRONT_IN_R 1   // GPA1 ← LM358 ch B OUT
-#define FRONT_OUT_L 2  // GPA2 → BC547 gate (steady ON; 555 modulates on bumper PCB)
-#define FRONT_OUT_R 3  // GPA3 → BC547 gate (steady ON; 555 modulates on bumper PCB)
-#endif
-
-// Body MCP @ MCP_BODY_ADDR — GPA0-2 Schmitt IN, GPA3-5 BC557 emitter OUT
-#ifndef BODY_IN_AUX
-#define BODY_IN_AUX 0    // GPA0 ← aux Schmitt OUT (INPUT)
-#define BODY_IN_WHEEL_L 1  // GPA1 ← wheel left Schmitt OUT (INPUT)
-#define BODY_IN_WHEEL_R 2  // GPA2 ← wheel right Schmitt OUT (INPUT)
-#define BODY_OUT_AUX 3     // GPA3 → aux IR gate (OUTPUT, BC557 PNP, MCP low = on)
-#define BODY_OUT_WHEEL_L 4 // GPA4 → wheel left emitter (OUTPUT, BC557 PNP)
-#define BODY_OUT_WHEEL_R 5 // GPA5 → wheel right emitter (OUTPUT, BC557 PNP)
-#define BODY_OUT_VL53_L 6  // GPA6 → left VL53L XSHUT (push-pull, HIGH = on)
-#define BODY_OUT_VL53_R 7  // GPA7 → right VL53L XSHUT
-#endif
-
-// Legacy aliases (old dual-chip in/out @ same GPA index on 0x20/0x21)
-#define MCP_IR_IN_ADDR MCP_FRONT_ADDR
-#define MCP_IR_OUT_ADDR MCP_BODY_ADDR
-#define MCP_IN_FRONT_L FRONT_IN_L
-#define MCP_IN_FRONT_R FRONT_IN_R
-#define MCP_OUT_FRONT_L FRONT_OUT_L
-#define MCP_OUT_FRONT_R FRONT_OUT_R
-#define MCP_IN_WHEEL_L BODY_IN_WHEEL_L
-#define MCP_IN_WHEEL_R BODY_IN_WHEEL_R
-#define MCP_IN_AUX BODY_IN_AUX
-#define MCP_OUT_WHEEL_L BODY_OUT_WHEEL_L
-#define MCP_OUT_WHEEL_R BODY_OUT_WHEEL_R
-#define MCP_OUT_AUX BODY_OUT_AUX
-
-#ifndef ROVER_AUX_SERVO_CHANNEL
-#define ROVER_AUX_SERVO_CHANNEL 0
+#ifndef BODY_IN_SPARE
+#define BODY_IN_SPARE 0    // GPA0 unused
+#define BODY_IN_WHEEL_L 1  // GPA1 ← wheel left Schmitt
+#define BODY_IN_WHEEL_R 2  // GPA2 ← wheel right Schmitt
+#define BODY_OUT_VL53_L8 3 // GPA3 → VL53L8CX LPn (HIGH = awake)
+#define BODY_OUT_WHEEL_L 4 // GPA4 → wheel left emitter (BC557 PNP, LOW = on)
+#define BODY_OUT_WHEEL_R 5 // GPA5 → wheel right emitter
+#define BODY_OUT_VL53_L 6  // GPA6 → left VL53L1X XSHUT
+#define BODY_OUT_VL53_R 7  // GPA7 → right VL53L1X XSHUT
 #endif
 
 #ifndef SONAR_SERVO_CHANNEL
-// Front pan sonar only — PCA9685 ch 15 (silkscreen “OUT16”). Aux rear = ch 0.
-#define SONAR_SERVO_CHANNEL 15
-#endif
-#ifndef ROVER_SERVO_CHANNEL
-#define ROVER_SERVO_CHANNEL SONAR_SERVO_CHANNEL
+// Rear pan sonar on PCA9685 ch 0. Bracket rotated 180°: 90° = aft.
+#define SONAR_SERVO_CHANNEL 0
 #endif
 
 #ifndef SONAR_GLANCE_MAG_DEG
-#define SONAR_GLANCE_MAG_DEG 18.0f
+// Rear + sides: ±70° around aft (logical 90°). Not a tiny front wiggle.
+#define SONAR_GLANCE_MAG_DEG 70.0f
 #endif
 #ifndef SONAR_GLANCE_PERIOD_MS
-#define SONAR_GLANCE_PERIOD_MS 3200
+#define SONAR_GLANCE_PERIOD_MS 3600
 #endif
 #ifndef SONAR_WIGGLE_HOLD_M
 // Hold pan at center (no wiggle) when forward range below this.
@@ -183,10 +144,14 @@
 #define SONAR_PAN_TRIM_DEG -5.0f
 #endif
 #ifndef SONAR_PAN_INVERT
-// 0 = normal mount. Set 1 only if horn is reversed on the spline (not a bracket flip).
-#define SONAR_PAN_INVERT 0
+// Bracket rotated 180° (was nose, now tail). Swap 0↔180 so logical left/right match chassis.
+#define SONAR_PAN_INVERT 1
 #endif
-// Sonar on pan bracket — distance from sensor face to front bumper (m).
+#ifndef ROVER_L8_SWAP_LR
+// Nose L8CX halves: col 0–3 vs 4–7. 1 = swap if peel always goes the wrong way.
+#define ROVER_L8_SWAP_LR 1
+#endif
+// Distance from sensor face to rear bumper (m). Same order as the old front offset.
 #ifndef SONAR_TO_BUMPER_M
 #define SONAR_TO_BUMPER_M 0.09f
 #endif
@@ -195,7 +160,7 @@
 #define SONAR_AVOID_M 0.38f
 #endif
 #ifndef SONAR_STOP_M
-// Hard stop forward (sonar reading). ~15 cm to bumper with 9 cm offset.
+// Hard stop reverse (aft cone). ~15 cm to rear bumper with 9 cm offset.
 #define SONAR_STOP_M 0.24f
 #endif
 #ifndef SONAR_SPIN_STOP_M
@@ -203,7 +168,7 @@
 #define SONAR_SPIN_STOP_M 0.30f
 #endif
 #ifndef SONAR_CLOSE_ANY_M
-// Any pan angle — treat as emergency forward stop.
+// Any pan angle — treat as emergency reverse stop when backing.
 #define SONAR_CLOSE_ANY_M 0.20f
 #endif
 #ifndef SONAR_REVERSE_M
@@ -310,6 +275,9 @@
 // When set to 1, firmware swaps published /rover/tof/left and /rover/tof/right (and ring overlay).
 #ifndef ROVER_VL53_SWAP_LR
 #define ROVER_VL53_SWAP_LR 0
+#endif
+#ifndef L8_STOP_M
+#define L8_STOP_M 0.24f
 #endif
 
 #ifndef STATUS_LED_PIN

@@ -31,6 +31,7 @@ class RoverPeriph {
   void tick_ir_map(uint32_t now_ms, bool front_l, bool front_r);
   void note_ir_rear_sample(uint32_t now_ms, float pan_deg, bool hit);
   void note_side_tof(uint32_t now_ms, float left_m, float right_m);
+  void note_l8_cols(uint32_t now_ms, const float* cols, uint8_t n);
 
   static constexpr uint8_t kMelodyReady = RoverSpeaker::kMelodyReady;
   static constexpr uint8_t kMelodyAutoStart = RoverSpeaker::kMelodyAutoStart;
@@ -57,6 +58,7 @@ class RoverPeriph {
   uint8_t _sonar_bins[ROVER_RING_COUNT];
   uint8_t _ir_bins[ROVER_RING_COUNT];
   uint8_t _tof_bins[ROVER_RING_COUNT];
+  uint8_t _l8_bins[ROVER_RING_COUNT];
   uint32_t _sonar_hold_until_ms = 0;
   bool _sonar_scanning = false;
   uint32_t _sonar_post_scan_until_ms = 0;
@@ -65,6 +67,7 @@ class RoverPeriph {
   int _sonar_last_ping_led = -1;
   uint32_t _ir_hold_until_ms = 0;
   uint32_t _tof_hold_until_ms = 0;
+  uint32_t _l8_hold_until_ms = 0;
 
 #if defined(ARDUINO_ARCH_ESP32)
   static void speaker_task(void* arg);

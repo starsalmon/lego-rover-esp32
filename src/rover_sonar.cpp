@@ -7,34 +7,9 @@
 #include "rover_diag.h"
 #include "ultrasonic.h"
 
-#ifndef SONAR_STOP_M
-#define SONAR_STOP_M 0.20f
-#endif
-#ifndef SONAR_AVOID_M
-#define SONAR_AVOID_M 0.55f
-#endif
-#ifndef SONAR_CLOSE_TREND_M
-#define SONAR_CLOSE_TREND_M 0.04f
-#endif
-#ifndef SONAR_FORWARD_READ_MS
-#define SONAR_FORWARD_READ_MS 80
-#endif
-#ifndef SONAR_GLANCE_MAG_DEG
-#define SONAR_GLANCE_MAG_DEG 12.0f
-#endif
-#ifndef SONAR_GLANCE_PERIOD_MS
-#define SONAR_GLANCE_PERIOD_MS 2200
-#endif
 #ifndef SONAR_BOOT_PAN_MS
 #define SONAR_BOOT_PAN_MS 200
 #endif
-// PCA9685 outputs a 50 Hz (20 ms) PWM cycle in hardware. Writing a new
-// ON/OFF register value more than once per cycle risks landing the write
-// right as the chip's internal counter wraps, tearing that cycle's pulse —
-// a real, constant glitch, not a "cheap chip" limitation. Throttle well
-// clear of that: 33 ms (~30 Hz) never lands twice in the same 20 ms window,
-// and at the wiggle's peak angular rate this is still a <1° step — smooth
-// to the eye.
 #ifndef SONAR_PAN_WRITE_MS
 #define SONAR_PAN_WRITE_MS 33
 #endif
@@ -146,6 +121,11 @@ void RoverSonar::set_pan(float deg) {
   }
 }
 
+void RoverSonar::set_side_hint(float left_m, float right_m) {
+  _hint_left_m = left_m;
+  _hint_right_m = right_m;
+}
+
 float RoverSonar::read_range() {
   if (!_sonar) {
     return -1.0f;
@@ -223,10 +203,33 @@ void RoverSonar::update_pan_wiggle(uint32_t now_ms) {
 
   _last_pan_write_ms = now_ms;
   const float center = center_pan();
+  if (hold_pan_wiggle()) {
+    if (fabsf(_pan_deg - center) > 0.5f) {
+      set_pan(center);
+    }
+    return;
+  }
   const float t = static_cast<float>((now_ms - _wiggle_t0_ms) % SONAR_GLANCE_PERIOD_MS) /
                   static_cast<float>(SONAR_GLANCE_PERIOD_MS);
   const float wiggle = sinf(t * 2.0f * static_cast<float>(M_PI)) * SONAR_GLANCE_MAG_DEG;
-  const float target = center + wiggle;
+  // Look a bit toward the closer side ToF so the cone isn't staring at empty
+  // space while he slides into a wall.
+  float bias = 0.0f;
+  const float hl = _hint_left_m;
+  const float hr = _hint_right_m;
+  if (hl > 0.05f && hr > 0.05f) {
+    bias = (hr - hl) * 40.0f;
+    if (bias > 18.0f) {
+      bias = 18.0f;
+    } else if (bias < -18.0f) {
+      bias = -18.0f;
+    }
+  } else if (hl > 0.05f && hl < 0.35f && hr < 0.0f) {
+    bias = 12.0f;
+  } else if (hr > 0.05f && hr < 0.35f && hl < 0.0f) {
+    bias = -12.0f;
+  }
+  const float target = center + bias + wiggle;
   set_pan(target);
 }
 
@@ -256,10 +259,11 @@ void RoverSonar::note_glance_sample(float pan_deg, float range_m) {
     return;
   }
   const float center = center_pan();
+  // pan 0 = chassis right, 90 = aft, 180 = chassis left (after invert).
   if (pan_deg <= center - SONAR_GLANCE_MAG_DEG * 0.5f) {
-    _glance_left_m = range_m;
-  } else if (pan_deg >= center + SONAR_GLANCE_MAG_DEG * 0.5f) {
     _glance_right_m = range_m;
+  } else if (pan_deg >= center + SONAR_GLANCE_MAG_DEG * 0.5f) {
+    _glance_left_m = range_m;
   } else {
     _last_forward_range_m = range_m;
     push_range_sample(range_m);
@@ -281,19 +285,12 @@ float RoverSonar::effective_forward_m() const {
 }
 
 float RoverSonar::brake_range_m() const {
-  // Only trust live center cone for clearance; a glance into open space must not
-  // release the forward brake while the nose still faces the wall.
+  // Only trust live aft cone for reverse clearance.
   float r = _last_forward_range_m;
   const float center = center_pan();
   const bool at_center = fabsf(_pan_deg - center) <= SONAR_GLANCE_MAG_DEG * 0.40f;
   if (at_center && _last_range_m > 0.0f) {
     r = (r > 0.0f) ? fminf(r, _last_range_m) : _last_range_m;
-  }
-  if (_glance_left_m > 0.0f) {
-    r = (r > 0.0f) ? fminf(r, _glance_left_m) : _glance_left_m;
-  }
-  if (_glance_right_m > 0.0f) {
-    r = (r > 0.0f) ? fminf(r, _glance_right_m) : _glance_right_m;
   }
   return r;
 }
@@ -346,13 +343,12 @@ bool RoverSonar::tick(uint32_t now_ms, float cmd_lin, float cmd_ang, bool body_m
     service_cal_capture();
   }
 
-  const bool forward = cmd_lin > 0.04f;
+  const bool reverse = cmd_lin < -0.04f;
   const bool turning = fabsf(cmd_ang) > 0.03f;
   _braking = false;
-  // Center-forward reading only — same as pre-wander-tune firmware.
-  const float fwd_rng = _last_forward_range_m;
-  if (forward && fwd_rng > 0.0f) {
-    if (fwd_rng < SONAR_STOP_M || (closing_trend() && fwd_rng < SONAR_AVOID_M)) {
+  const float aft_rng = _last_forward_range_m;
+  if (reverse && aft_rng > 0.0f) {
+    if (aft_rng < SONAR_STOP_M || (closing_trend() && aft_rng < SONAR_AVOID_M)) {
       _braking = true;
     }
   }
@@ -365,9 +361,8 @@ bool RoverSonar::tick(uint32_t now_ms, float cmd_lin, float cmd_ang, bool body_m
 
   *out_lin = cmd_lin;
   *out_ang = cmd_ang;
-  if (turning && forward && fwd_rng > 0.0f && fwd_rng < SONAR_SPIN_STOP_M) {
-    // Creep forward while steering — never spin in place against a wall.
-    *out_lin = fmaxf(cmd_lin, 0.08f);
+  if (turning && reverse && aft_rng > 0.0f && aft_rng < SONAR_SPIN_STOP_M) {
+    *out_lin = 0.0f;
     return true;
   }
   return false;

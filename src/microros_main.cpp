@@ -16,6 +16,7 @@
 #include <std_msgs/msg/bool.h>
 #include <std_msgs/msg/u_int8.h>
 #include <std_msgs/msg/float32.h>
+#include <std_msgs/msg/float32_multi_array.h>
 #include <std_msgs/msg/u_int32.h>
 
 #include "drive.h"
@@ -46,6 +47,9 @@
 #endif
 #if defined(ROVER_VL53L)
 #include "rover_vl53.h"
+#endif
+#if defined(ROVER_VL53L8)
+#include "rover_vl53l8.h"
 #endif
 #if defined(ROVER_PERIPH)
 #include "rover_periph.h"
@@ -91,12 +95,11 @@ static rcl_publisher_t stall_pub;
 static rcl_publisher_t button_pub;
 static rcl_publisher_t button_event_pub;
 static rcl_publisher_t drive_mode_pub;
-#if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR) && !defined(ROVER_DISABLE_FRONT_IR)
-static rcl_publisher_t ir_front_pub;
-#endif
-static rcl_publisher_t ir_aux_result_pub;
+static rcl_publisher_t battery_pub;
+#if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
 static rcl_publisher_t wheel_l_ticks_pub;
 static rcl_publisher_t wheel_r_ticks_pub;
+#endif
 static rcl_publisher_t sonar_range_pub;
 static rcl_publisher_t sonar_pan_pub;
 static rcl_publisher_t sonar_avoid_pub;
@@ -108,7 +111,12 @@ static rcl_publisher_t sonar_escape_best_m_pub;
 static rcl_publisher_t tof_left_pub;
 static rcl_publisher_t tof_right_pub;
 #endif
-static rcl_subscription_t ir_aux_sample_sub;
+#if defined(ROVER_VL53L8)
+static rcl_publisher_t tof_front_pub;
+static rcl_publisher_t tof_front_left_pub;
+static rcl_publisher_t tof_front_right_pub;
+static rcl_publisher_t tof_l8_cols_pub;
+#endif
 static rcl_subscription_t servo_angle_sub;
 static rclc_executor_t executor;
 static geometry_msgs__msg__Twist cmd_msg;
@@ -118,11 +126,7 @@ static std_msgs__msg__Bool stall_msg;
 static std_msgs__msg__Bool button_msg;
 static std_msgs__msg__UInt8 button_event_msg;
 static std_msgs__msg__UInt8 drive_mode_msg;
-#if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR) && !defined(ROVER_DISABLE_FRONT_IR)
-static std_msgs__msg__Bool ir_front_msg;
-#endif
-static std_msgs__msg__UInt8 ir_aux_result_msg;
-static std_msgs__msg__UInt8 ir_aux_sample_msg;
+static std_msgs__msg__Float32 battery_msg;
 static std_msgs__msg__Float32 servo_angle_msg;
 static std_msgs__msg__UInt32 wheel_l_ticks_msg;
 static std_msgs__msg__UInt32 wheel_r_ticks_msg;
@@ -136,6 +140,13 @@ static std_msgs__msg__Float32 sonar_escape_best_m_msg;
 #if defined(ROVER_VL53L)
 static sensor_msgs__msg__Range tof_left_msg;
 static sensor_msgs__msg__Range tof_right_msg;
+#endif
+#if defined(ROVER_VL53L8)
+static sensor_msgs__msg__Range tof_front_msg;
+static sensor_msgs__msg__Range tof_front_left_msg;
+static sensor_msgs__msg__Range tof_front_right_msg;
+static std_msgs__msg__Float32MultiArray tof_l8_cols_msg;
+static float tof_l8_cols_data[8];
 #endif
 static std_msgs__msg__Bool session_msg;
 static std_msgs__msg__UInt32 heartbeat_msg;
@@ -156,7 +167,7 @@ static GoButton go_button;
 static RoverDisplay display;
 static RoverOta ota;
 static RoverUiData ui;
-static uint32_t stall_block_until = 0;
+static volatile uint32_t stall_block_until = 0;
 static bool pi_session_sub_value = false;
 static uint32_t last_pi_traffic_ms = 0;
 static bool bridge_live_latched = false;
@@ -169,25 +180,14 @@ static RoverPowerAction selected_power_action = kPowerShutdown;
 
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
 static RoverMcpIr mcp_ir;
-static bool ir_aux_sample_pending = false;
-static bool ir_aux_sample_front = false;
-static bool ir_pub_front = false;
-static uint32_t ir_front_flash_until = 0;
 static bool ir_wheels_on = false;
 static I2cScanResult ir_i2c_scan;
 static uint32_t last_ir_retry_ms = 0;
 static uint32_t last_ir_scan_ms = 0;
-
-// Aux IR sweep (rear 180°) for ring visualization during scans.
-static uint8_t ir_sweep_step = 0;
-static uint32_t ir_sweep_step_ms = 0;
-static bool ir_sweep_waiting = false;
-static float ir_sweep_deg = 90.0f;
 #endif
 
 #ifdef ROVER_TDISPLAY_S3
 static RoverPca9685 pca9685;
-static float servo_target_deg = 90.0f;
 static IrTx ir_beacon;
 #if defined(ROVER_SONAR)
 static Ultrasonic sonar;
@@ -196,6 +196,9 @@ static TaskHandle_t pan_task_handle = nullptr;
 #endif
 #if defined(ROVER_VL53L)
 static RoverVl53 side_tof;
+#endif
+#if defined(ROVER_VL53L8)
+static RoverVl53L8 front_tof;
 #endif
 #if defined(ROVER_PERIPH)
 static RoverPeriph rover_periph;
@@ -210,6 +213,11 @@ static uint32_t boot_reason_until_ms = 0;
 
 static float last_lin = 0, last_ang = 0;
 static uint32_t last_drive_ms = 0;
+static uint32_t last_uros_ping_ms = 0;
+#if defined(ROVER_VL53L) || defined(ROVER_VL53L8)
+static TaskHandle_t tof_task_handle = nullptr;
+#endif
+static TaskHandle_t safety_drive_task_handle = nullptr;
 static float last_heading_trim = 0.0f;
 static float last_imu_yaw_deg = 0.0f;
 static float last_imu_gz_dps = 0.0f;
@@ -231,7 +239,8 @@ static bool explore_motion_armed() {
 }
 
 static bool sonar_scan_hold() {
-  return explore_motion_armed() && rover_sonar.cal_sweep_active();
+  // Rear pan must not pin the motors. Aft cal_sweep is a map, not a stop.
+  return false;
 }
 
 static void update_session_cal_sweep(uint32_t now_ms) {
@@ -254,9 +263,9 @@ static void update_session_cal_sweep(uint32_t now_ms) {
     rover_sonar.set_pan_scan_enabled(false);
     return;
   }
-  // Cain request (Aug 2026): disable cruise wiggle while driving.
-  // Hold pan forward; only move during explicit scans (cal_sweep).
-  rover_sonar.set_pan_scan_enabled(false);
+  // Glance the pan while driving so angled walls aren't invisible to a
+  // center-only ping. ±40° is enough to see a wall the nose is sliding along.
+  rover_sonar.set_pan_scan_enabled(true);
   if (!session_cal_sweep_triggered && !rover_sonar.cal_sweep_active()) {
     if (go_cal_sweep_pending) {
       rover_sonar.set_cal_sweep(true);
@@ -326,22 +335,10 @@ static bool entities_ok = false;
 
 void on_cmd(const void *msgin);
 
-#if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
-void on_ir_aux_sample(const void *msgin) {
-  const auto *m = static_cast<const std_msgs__msg__UInt8 *>(msgin);
-  if (m->data == 0) return;
-  ir_aux_sample_pending = true;
-  ir_aux_sample_front = (m->data == 2);
-}
-#endif
-
 #ifdef ROVER_TDISPLAY_S3
 void on_servo_angle(const void *msgin) {
-  const auto *m = static_cast<const std_msgs__msg__Float32 *>(msgin);
-  servo_target_deg = m->data;
-  if (pca9685.ok()) {
-    pca9685.setAngle(ROVER_AUX_SERVO_CHANNEL, servo_target_deg, 0.0f, 180.0f, 500, 2500);
-  }
+  (void)msgin;
+  // Pan lives on PCA ch 0 via rover_sonar — don't fight it from this topic.
 }
 #endif
 
@@ -700,7 +697,7 @@ static void poll_mcp_ir(uint32_t now) {
     ir_i2c_scan = scanI2cBus();
   }
 
-  if (!mcp_ir.front_ok() || !mcp_ir.body_ok()) {
+  if (!mcp_ir.body_ok()) {
     if (now - last_ir_retry_ms >= 2000) {
       last_ir_retry_ms = now;
       mcp_ir.begin(MPU_SDA, MPU_SCL);
@@ -718,85 +715,6 @@ static void poll_mcp_ir(uint32_t now) {
   }
 
   mcp_ir.tick(now);
-
-  const bool front = mcp_ir.front_hit();
-  const bool rover_moving =
-      pi_session_sub_value || (now - last_drive_ms < 1000);
-  static bool last_front_bumper = false;
-  if (mcp_ir.front_ok() && rover_moving && front && !last_front_bumper) {
-    publish_bump_event("front IR bumper");
-  }
-  last_front_bumper = front;
-
-#if defined(ROVER_DISABLE_FRONT_IR)
-  (void)front;
-  const bool front_for_ros = false;
-#else
-  const bool front_for_ros = front;
-#endif
-  if (front_for_ros) {
-    ir_front_flash_until = now + 500;
-  }
-
-#if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR) && !defined(ROVER_DISABLE_FRONT_IR)
-  static uint32_t last_ir_front_pub = 0;
-  static bool last_ir_front_sent = false;
-  if (ros_state == RosState::kConnected) {
-    const uint32_t pub_period = front_for_ros ? 25u : 1000u;
-    const bool edge = front_for_ros != last_ir_front_sent;
-    if (edge || (now - last_ir_front_pub >= pub_period)) {
-      last_ir_front_pub = now;
-      last_ir_front_sent = front_for_ros;
-      ir_pub_front = front_for_ros;
-      ir_front_msg.data = front_for_ros;
-      RCSOFTCHECK(rcl_publish(&ir_front_pub, &ir_front_msg, NULL));
-    }
-  }
-#endif
-
-  if (ir_aux_sample_pending) {
-    bool process_aux = true;
-#if defined(ROVER_SONAR)
-    static uint32_t aux_defer_since = 0;
-    if (rover_sonar.avoid_active()) {
-      if (aux_defer_since == 0) {
-        aux_defer_since = now;
-      }
-      if (now - aux_defer_since < 600) {
-        process_aux = false;
-      }
-    } else {
-      aux_defer_since = 0;
-    }
-#endif
-    if (!process_aux) {
-      // Keep pending — wheel ticks etc. still run below.
-    } else {
-    ir_aux_sample_pending = false;
-    const bool want_front = ir_aux_sample_front;
-    ir_aux_sample_front = false;
-
-    bool aux_off = false;
-    bool aux_on = false;
-    bool front_off = false;
-    bool front_on = false;
-
-    if (want_front) {
-      mcp_ir.sample_front(MCP_IR_FRONT_SAMPLE_OFF_MS, MCP_IR_FRONT_SAMPLE_ON_MS, front_off,
-                          front_on);
-    } else {
-      mcp_ir.sample_aux(MCP_IR_AUX_OFF_MS, MCP_IR_AUX_ON_MS, aux_off, aux_on);
-    }
-
-    ir_aux_result_msg.data = static_cast<uint8_t>(
-        (aux_off ? 1u : 0u) | (aux_on ? 2u : 0u) | (front_off ? 4u : 0u) | (front_on ? 8u : 0u));
-    if (ros_state == RosState::kConnected) {
-      RCSOFTCHECK(rcl_publish(&ir_aux_result_pub, &ir_aux_result_msg, NULL));
-    }
-    Serial.printf("IR sample aux off=%d on=%d front off=%d on=%d\n", (int)aux_off, (int)aux_on,
-                  (int)front_off, (int)front_on);
-    }
-  }
 
   static uint32_t last_wheel_pub = 0;
   if (ros_state == RosState::kConnected && (now - last_wheel_pub >= 100)) {
@@ -830,17 +748,10 @@ static bool create_entities() {
   RCCHECK(rclc_publisher_init_default(
     &drive_mode_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
     "rover/drive_mode"));
+  RCCHECK(rclc_publisher_init_default(
+    &battery_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+    "rover/battery/voltage"));
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
-#if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR) && !defined(ROVER_DISABLE_FRONT_IR)
-  RCCHECK(rclc_publisher_init_default(
-    &ir_front_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "rover/ir/front"));
-#endif
-  RCCHECK(rclc_publisher_init_default(
-    &ir_aux_result_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
-    "rover/ir/aux_result"));
-  RCCHECK(rclc_subscription_init_default(
-    &ir_aux_sample_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
-    "rover/ir/aux_sample"));
   RCCHECK(rclc_publisher_init_default(
     &wheel_l_ticks_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
     "rover/wheel/left_ticks"));
@@ -882,6 +793,20 @@ static bool create_entities() {
     &tof_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/tof/right"));
 #endif
+#if defined(ROVER_VL53L8)
+  RCCHECK(rclc_publisher_init_default(
+    &tof_front_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
+    "rover/tof/front"));
+  RCCHECK(rclc_publisher_init_default(
+    &tof_front_left_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
+    "rover/tof/front_left"));
+  RCCHECK(rclc_publisher_init_default(
+    &tof_front_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
+    "rover/tof/front_right"));
+  RCCHECK(rclc_publisher_init_default(
+    &tof_l8_cols_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+    "rover/tof/l8_cols"));
+#endif
 #ifdef ROVER_TDISPLAY_S3
   RCCHECK(rclc_subscription_init_default(
     &servo_angle_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
@@ -902,10 +827,6 @@ static bool create_entities() {
     &executor, &sonar_cal_sweep_sub, &sonar_cal_sweep_msg, &on_sonar_cal_sweep,
     ON_NEW_DATA));
 #endif
-#if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
-  RCCHECK(rclc_executor_add_subscription(
-    &executor, &ir_aux_sample_sub, &ir_aux_sample_msg, &on_ir_aux_sample, ON_NEW_DATA));
-#endif
 #ifdef ROVER_TDISPLAY_S3
   RCCHECK(rclc_executor_add_subscription(
     &executor, &servo_angle_sub, &servo_angle_msg, &on_servo_angle, ON_NEW_DATA));
@@ -917,11 +838,7 @@ static bool create_entities() {
   button_msg.data = false;
   button_event_msg.data = 0;
   drive_mode_msg.data = static_cast<uint8_t>(kDriveExplore);
-#if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR) && !defined(ROVER_DISABLE_FRONT_IR)
-  ir_front_msg.data = false;
-#endif
-  ir_aux_result_msg.data = 0;
-  ir_aux_sample_msg.data = 0;
+  battery_msg.data = 0.0f;
   wheel_l_ticks_msg.data = 0;
   wheel_r_ticks_msg.data = 0;
   servo_angle_msg.data = 90.0f;
@@ -946,6 +863,25 @@ static bool create_entities() {
   tof_left_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
   tof_right_msg = tof_left_msg;
 #endif
+#if defined(ROVER_VL53L8)
+  tof_front_msg.range = std::numeric_limits<float>::quiet_NaN();
+  tof_front_msg.min_range = 0.02f;
+  tof_front_msg.max_range = 4.0f;
+  tof_front_msg.field_of_view = 0.80f;
+  tof_front_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
+  tof_front_left_msg = tof_front_msg;
+  tof_front_right_msg = tof_front_msg;
+  tof_l8_cols_msg.layout.dim.data = nullptr;
+  tof_l8_cols_msg.layout.dim.size = 0;
+  tof_l8_cols_msg.layout.dim.capacity = 0;
+  tof_l8_cols_msg.layout.data_offset = 0;
+  tof_l8_cols_msg.data.data = tof_l8_cols_data;
+  tof_l8_cols_msg.data.size = 8;
+  tof_l8_cols_msg.data.capacity = 8;
+  for (uint8_t i = 0; i < 8; i++) {
+    tof_l8_cols_data[i] = std::numeric_limits<float>::quiet_NaN();
+  }
+#endif
   session_msg.data = false;
   pi_session_sub_value = false;
   return true;
@@ -966,14 +902,10 @@ static void destroy_entities() {
   RCSOFTCHECK(rcl_publisher_fini(&button_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&button_event_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&drive_mode_pub, &node));
+  RCSOFTCHECK(rcl_publisher_fini(&battery_pub, &node));
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
-#if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR) && !defined(ROVER_DISABLE_FRONT_IR)
-  RCSOFTCHECK(rcl_publisher_fini(&ir_front_pub, &node));
-#endif
-  RCSOFTCHECK(rcl_publisher_fini(&ir_aux_result_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&wheel_l_ticks_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&wheel_r_ticks_pub, &node));
-  RCSOFTCHECK(rcl_subscription_fini(&ir_aux_sample_sub, &node));
 #endif
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_SONAR)
   RCSOFTCHECK(rcl_publisher_fini(&sonar_range_pub, &node));
@@ -988,6 +920,12 @@ static void destroy_entities() {
 #if defined(ROVER_VL53L)
   RCSOFTCHECK(rcl_publisher_fini(&tof_left_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&tof_right_pub, &node));
+#endif
+#if defined(ROVER_VL53L8)
+  RCSOFTCHECK(rcl_publisher_fini(&tof_front_pub, &node));
+  RCSOFTCHECK(rcl_publisher_fini(&tof_front_left_pub, &node));
+  RCSOFTCHECK(rcl_publisher_fini(&tof_front_right_pub, &node));
+  RCSOFTCHECK(rcl_publisher_fini(&tof_l8_cols_pub, &node));
 #endif
 #ifdef ROVER_TDISPLAY_S3
   RCSOFTCHECK(rcl_subscription_fini(&servo_angle_sub, &node));
@@ -1044,18 +982,17 @@ static void apply_drive(float yaw_rate, float dt) {
 #else
   const bool sonar_override = false;
 #endif
-  if (!sonar_override) {
-#if defined(ROVER_MCP_IR) && !defined(ROVER_DISABLE_FRONT_IR)
 #ifndef FORWARD_LINEAR_SIGN
 #define FORWARD_LINEAR_SIGN 1.0f
 #endif
-    if (mcp_ir.front_ok() && mcp_ir.front_hit()) {
-      const bool reversing =
-          (FORWARD_LINEAR_SIGN > 0.0f) ? (v < -0.03f) : (v > 0.03f);
-      if (!reversing) {
-        v = 0.0f;
-        turn = 0.0f;
-      }
+  const bool reversing =
+      (FORWARD_LINEAR_SIGN > 0.0f) ? (v < -0.03f) : (v > 0.03f);
+  if (!sonar_override) {
+#if defined(ROVER_VL53L8)
+    if (front_tof.ok() && front_tof.close_ahead() && !reversing) {
+      // v=0 makes the mixer below throw away `turn`, so a steer-off-the-wall
+      // command becomes a full stop. Back off fast enough that the turn survives.
+      v = -0.12f;
     }
 #endif
   }
@@ -1091,9 +1028,15 @@ static void apply_drive(float yaw_rate, float dt) {
   if (fabsf(turn) < STEER_DEAD) {
     l = v + trim_out;
     r = v - trim_out;
-  } else if (fabsf(v) < MIN_WHEEL) {
-    l = v;
-    r = v;
+  } else if (fabsf(v) < 0.12f) {
+    // A zeroed v used to drop the turn and the robot sat there. Keep an arc.
+    v = (v < -0.02f) ? -0.12f : 0.12f;
+    const float max_turn = fabsf(v) - MIN_WHEEL;
+    if (fabsf(turn) > max_turn) {
+      turn = (turn > 0.0f) ? max_turn : -max_turn;
+    }
+    l = v - turn;
+    r = v + turn;
   } else {
     const float max_turn = fabsf(v) - MIN_WHEEL;
     if (fabsf(turn) > max_turn) {
@@ -1138,50 +1081,58 @@ void on_cmd(const void *msgin) {
 }
 
 static void handle_ros_state() {
+  const uint32_t now = millis();
   switch (ros_state) {
-    case RosState::kWaitAgent:
-      if (RMW_RET_OK == rmw_uros_ping_agent(200, 3)) {
-        Serial.println("micro-ROS agent found — connecting...");
-        ros_state = RosState::kConnect;
-      }
+  case RosState::kWaitAgent:
+    if (now - last_uros_ping_ms < 400) {
       break;
+    }
+    last_uros_ping_ms = now;
+    if (RMW_RET_OK == rmw_uros_ping_agent(100, 1)) {
+      Serial.println("micro-ROS agent found — connecting...");
+      ros_state = RosState::kConnect;
+    }
+    break;
 
-    case RosState::kConnect:
-      if (create_entities()) {
-        entities_ok = true;
-        ros_state = RosState::kConnected;
-        ros_connected_at_ms = millis();
-        Serial.println("micro-ROS ready");
+  case RosState::kConnect:
+    if (create_entities()) {
+      entities_ok = true;
+      ros_state = RosState::kConnected;
+      ros_connected_at_ms = millis();
+      Serial.println("micro-ROS ready");
 #if defined(ROVER_PERIPH)
-        if (!periph_ready_played) {
-          periph_ready_played = true;
-          rover_periph.notify_ready();
-        }
+      if (!periph_ready_played) {
+        periph_ready_played = true;
+        rover_periph.notify_ready();
+      }
 #endif
 #if defined(ROVER_VL53L)
-        rover_diag_event("vl53_link L=%s R=%s", side_tof.left_ok() ? "OK" : "--",
-                         side_tof.right_ok() ? "OK" : "--");
+      rover_diag_event("vl53_link L=%s R=%s", side_tof.left_ok() ? "OK" : "--",
+                       side_tof.right_ok() ? "OK" : "--");
 #endif
 #ifdef ROVER_TDISPLAY_S3
-        publish_drive_mode();
+      publish_drive_mode();
 #endif
-      } else {
-        Serial.println("micro-ROS init failed — retrying...");
-        destroy_entities();
-        ros_state = RosState::kWaitAgent;
-        delay(500);
-      }
-      break;
+    } else {
+      Serial.println("micro-ROS init failed — retrying...");
+      destroy_entities();
+      ros_state = RosState::kWaitAgent;
+    }
+    break;
 
-    case RosState::kConnected:
-      if (RMW_RET_OK != rmw_uros_ping_agent(800, 6)) {
-        ros_state = RosState::kDisconnect;
-      }
+  case RosState::kConnected:
+    if (now - last_uros_ping_ms < 1000) {
       break;
+    }
+    last_uros_ping_ms = now;
+    if (RMW_RET_OK != rmw_uros_ping_agent(100, 1)) {
+      ros_state = RosState::kDisconnect;
+    }
+    break;
 
-    case RosState::kDisconnect:
-      on_session_lost();
-      break;
+  case RosState::kDisconnect:
+    on_session_lost();
+    break;
   }
 }
 
@@ -1312,19 +1263,11 @@ void setup() {
     Serial.print(" (none)");
   }
   Serial.println();
-  if (mcp_ir.front_ok()) {
-    mcp_ir.logFrontIoState();
-  }
   if (mcp_ir.body_ok()) {
     mcp_ir.logBodyIoState();
-  }
-  if (mcp_ir.ok()) {
-    Serial.printf("MCP IR front=%s body=%s gates_live=%s (I2C SDA=%d SCL=%d)\n",
-                  mcp_ir.front_ok() ? "OK" : "--", mcp_ir.body_ok() ? "OK" : "--",
-                  mcp_ir.front_emitting() ? "yes" : "NO", MPU_SDA, MPU_SCL);
+    Serial.printf("MCP body OK (I2C SDA=%d SCL=%d)\n", MPU_SDA, MPU_SCL);
   } else {
-    Serial.printf("MCP IR partial front=%s body=%s SDA=%d SCL=%d scan:",
-                  mcp_ir.front_ok() ? "OK" : "--", mcp_ir.body_ok() ? "OK" : "--", MPU_SDA, MPU_SCL);
+    Serial.printf("MCP body missing SDA=%d SCL=%d scan:", MPU_SDA, MPU_SCL);
     for (uint8_t i = 0; i < ir_i2c_scan.count; i++) {
       Serial.printf(" 0x%02x", ir_i2c_scan.addrs[i]);
     }
@@ -1332,13 +1275,13 @@ void setup() {
   }
 #endif
   if (pca9685.begin(PCA9685_ADDR)) {
-    Serial.printf("PCA9685 OK @ 0x%02x aux ch %d sonar ch %d\n", (unsigned)PCA9685_ADDR,
-                  (int)ROVER_AUX_SERVO_CHANNEL, (int)ROVER_SERVO_CHANNEL);
-    pca9685.setAngle(ROVER_AUX_SERVO_CHANNEL, 90.0f, 0.0f, 180.0f, 500, 2500);
+    Serial.printf("PCA9685 OK @ 0x%02x sonar pan ch %d\n",
+                  (unsigned)PCA9685_ADDR, (int)SONAR_SERVO_CHANNEL);
   } else {
-    Serial.println("PCA9685 not found — aux servo unavailable");
+    Serial.println("PCA9685 not found — pan servo unavailable");
   }
 #if defined(ROVER_SONAR)
+  bool start_pan_task = false;
   if (sonar.begin(SONAR_TRIG_PIN, SONAR_ECHO_PIN)) {
     rover_sonar.begin(&sonar, pca9685.ok() ? &pca9685 : nullptr);
     // Load persisted pan timing calibration (optional).
@@ -1356,11 +1299,56 @@ void setup() {
     rover_sonar.boot_full_sweep();
 #endif
     Serial.printf("Sonar OK TRIG=%d ECHO=%d pan ch %d\n", SONAR_TRIG_PIN, SONAR_ECHO_PIN,
-                  (int)ROVER_SERVO_CHANNEL);
-    // The pan sweep gets its own task on the other core, on a fixed
-    // schedule, so it never inherits the main loop's TFT/WiFi/ROS jitter
-    // (measured at 10-150+ ms per iteration). Arduino's loopTask runs on
-    // core 1, so pin this to core 0.
+                  (int)SONAR_SERVO_CHANNEL);
+    start_pan_task = true;
+  } else {
+    Serial.println("WARN: sonar init failed");
+  }
+#endif
+#if defined(ROVER_VL53L)
+  if (!side_tof.begin(&mcp_ir)) {
+    Serial.println("WARN: VL53 init failed (check SDA/SCL, MCP GPA6/7 XSHUT, chip=L1X not L0X)");
+  }
+#endif
+#if defined(ROVER_MCP_IR)
+  // Side L1X now at 0x30/0x31 — wake front VL53L8CX on GPA3 (old aux IR).
+  mcp_ir.set_vl53l8_lpn(true);
+  delay(20);
+  {
+    const I2cScanResult l8scan = scanI2cBus();
+    bool saw_l8 = false;
+    for (uint8_t i = 0; i < l8scan.count; i++) {
+      if (l8scan.addrs[i] == 0x29) saw_l8 = true;
+    }
+    Serial.printf("VL53L8CX LPn=GPA3 %s (expect 0x29)\n", saw_l8 ? "OK" : "not on bus yet");
+  }
+#endif
+#if defined(ROVER_VL53L8)
+  if (!front_tof.begin()) {
+    Serial.println("WARN: VL53L8CX ranging failed — check SPI_I2C_N=GND, LPn=GPA3, shroud on");
+  }
+#endif
+#if defined(ROVER_VL53L) || defined(ROVER_VL53L8)
+  xTaskCreatePinnedToCore(
+      [](void *) {
+        for (;;) {
+#if defined(ROVER_VL53L)
+          if (side_tof.ok()) {
+            side_tof.poll();
+          }
+#endif
+#if defined(ROVER_VL53L8)
+          if (front_tof.ok()) {
+            front_tof.poll();
+          }
+#endif
+          vTaskDelay(pdMS_TO_TICKS(100));
+        }
+      },
+      "tof", 6144, nullptr, 2, &tof_task_handle, 0);
+#endif
+#if defined(ROVER_SONAR)
+  if (start_pan_task) {
     xTaskCreatePinnedToCore(
         [](void*) {
           for (;;) {
@@ -1370,13 +1358,6 @@ void setup() {
         },
         "pan_wiggle", 3072, nullptr, 1, &pan_task_handle, 0);
     rover_diag_set_pan_task(pan_task_handle);
-  } else {
-    Serial.println("WARN: sonar init failed");
-  }
-#endif
-#if defined(ROVER_VL53L)
-  if (!side_tof.begin(&mcp_ir)) {
-    Serial.println("WARN: VL53 init failed (check SDA/SCL, MCP GPA6/7 XSHUT, chip=L1X not L0X)");
   }
 #endif
 #if defined(ROVER_PERIPH)
@@ -1399,6 +1380,26 @@ void setup() {
   if (!drv.begin(DIR_L, PWM_L, DIR_R, PWM_R)) {
     Serial.println("FAIL: LEDC attach — check PWM pins");
   }
+  xTaskCreatePinnedToCore(
+      [](void *) {
+        for (;;) {
+          const uint32_t t = millis();
+#ifdef ROVER_TDISPLAY_S3
+          estop.poll(t);
+          const bool cut =
+              estop.active() || battery.critical() || (t < stall_block_until);
+#else
+          const bool cut = false;
+#endif
+          if (cut) {
+            drv.hard_stop();
+          } else {
+            drv.tick();
+          }
+          vTaskDelay(pdMS_TO_TICKS(5));
+        }
+      },
+      "safety_drv", 3072, nullptr, 5, &safety_drive_task_handle, 1);
 
 #ifdef ROVER_TDISPLAY_S3
   display.begin();
@@ -1451,7 +1452,6 @@ void loop() {
   prev = now;
 
 #ifdef ROVER_TDISPLAY_S3
-  estop.poll(now);
   go_button.poll(now);
   battery.update(now);
   ir_beacon.tick();
@@ -1504,14 +1504,6 @@ void loop() {
     }
   }
   const float yaw_deg = imu_ok ? heading.angle_deg_wrapped() : 0.0f;
-
-#if defined(ROVER_VL53L)
-  static uint32_t last_tof_poll = 0;
-  if (side_tof.ok() && now - last_tof_poll >= 100) {
-    last_tof_poll = now;
-    side_tof.poll();
-  }
-#endif
 
   if (ros_state == RosState::kConnected) {
 #if defined(ROVER_SONAR)
@@ -1587,6 +1579,9 @@ void loop() {
       bool okR = side_tof.right_ok();
       float mL = okL ? side_tof.range_left_m() : -1.0f;
       float mR = okR ? side_tof.range_right_m() : -1.0f;
+#if defined(ROVER_SONAR)
+      rover_sonar.set_side_hint(okL ? mL : -1.0f, okR ? mR : -1.0f);
+#endif
 #if ROVER_VL53_SWAP_LR
       const bool t_ok = okL;
       okL = okR;
@@ -1611,7 +1606,37 @@ void loop() {
       }
     }
 #endif
-
+#if defined(ROVER_VL53L8)
+    static uint32_t last_l8_pub = 0;
+    if (front_tof.ok() && now - last_l8_pub >= 100) {
+      last_l8_pub = now;
+      const int32_t sec = static_cast<int32_t>(now / 1000);
+      const uint32_t nsec = static_cast<uint32_t>((now % 1000) * 1000000UL);
+      const float fc = front_tof.range_center_m();
+      const float fl = front_tof.range_left_m();
+      const float fr = front_tof.range_right_m();
+      tof_front_msg.range = (fc > 0.0f) ? fc : std::numeric_limits<float>::quiet_NaN();
+      tof_front_msg.header.stamp.sec = sec;
+      tof_front_msg.header.stamp.nanosec = nsec;
+      RCSOFTCHECK(rcl_publish(&tof_front_pub, &tof_front_msg, NULL));
+      tof_front_left_msg.range = (fl > 0.0f) ? fl : std::numeric_limits<float>::quiet_NaN();
+      tof_front_left_msg.header.stamp.sec = sec;
+      tof_front_left_msg.header.stamp.nanosec = nsec;
+      RCSOFTCHECK(rcl_publish(&tof_front_left_pub, &tof_front_left_msg, NULL));
+      tof_front_right_msg.range = (fr > 0.0f) ? fr : std::numeric_limits<float>::quiet_NaN();
+      tof_front_right_msg.header.stamp.sec = sec;
+      tof_front_right_msg.header.stamp.nanosec = nsec;
+      RCSOFTCHECK(rcl_publish(&tof_front_right_pub, &tof_front_right_msg, NULL));
+      for (uint8_t i = 0; i < 8; i++) {
+        const float c = front_tof.column_m(i);
+        tof_l8_cols_data[i] = (c > 0.0f) ? c : std::numeric_limits<float>::quiet_NaN();
+      }
+      RCSOFTCHECK(rcl_publish(&tof_l8_cols_pub, &tof_l8_cols_msg, NULL));
+#if defined(ROVER_PERIPH)
+      rover_periph.note_l8_cols(now, tof_l8_cols_data, 8);
+#endif
+    }
+#endif
 #ifdef ROVER_TDISPLAY_S3
     const bool rover_active =
         pi_session_sub_value || (millis() - last_drive_ms < 1000);
@@ -1662,8 +1687,13 @@ void loop() {
       }
       motion.clear_events();
     }
-  } else {
-    drv.tick();
+
+    static uint32_t last_bat_pub = 0;
+    if (now - last_bat_pub >= 1000) {
+      last_bat_pub = now;
+      battery_msg.data = battery.voltage();
+      RCSOFTCHECK(rcl_publish(&battery_pub, &battery_msg, NULL));
+    }
   }
 
   static uint32_t last_hb = 0;
@@ -1680,10 +1710,6 @@ void loop() {
     Serial.printf(" pi=%lus", last_pi_traffic_ms ? (unsigned long)((now - last_pi_traffic_ms) / 1000) : 999UL);
 #endif
     Serial.println();
-  }
-
-  if (ros_state == RosState::kConnected) {
-    drv.tick();
   }
 
 #if defined(ROVER_SONAR)
@@ -1722,46 +1748,6 @@ void loop() {
       r = t_m;
 #endif
       rover_periph.note_side_tof(now, l, r);
-    }
-#endif
-    // IR overlay: front bumper hits + rear aux sweep samples.
-#if defined(ROVER_MCP_IR)
-    if (mcp_ir.front_ok()) {
-      rover_periph.tick_ir_map(now, mcp_ir.front_left_hit(), mcp_ir.front_right_hit());
-    }
-    const bool want_ir_sweep = rover_sonar.cal_sweep_active() && mcp_ir.body_ok() && pca9685.ok();
-    if (want_ir_sweep) {
-      // Sweep rear aux IR over 0..180 while sonar scan is active.
-      static constexpr float kAngles[] = {0.0f, 45.0f, 90.0f, 135.0f, 180.0f, 135.0f, 90.0f, 45.0f};
-      static constexpr uint8_t kCount = sizeof(kAngles) / sizeof(kAngles[0]);
-      static constexpr uint32_t kSettleMs = 120;
-      static constexpr uint32_t kBetweenMs = 40;
-
-      if (ir_sweep_step_ms == 0) {
-        ir_sweep_step_ms = now;
-        ir_sweep_step = 0;
-        ir_sweep_waiting = false;
-      }
-      if (!ir_sweep_waiting) {
-        ir_sweep_deg = kAngles[ir_sweep_step % kCount];
-        pca9685.setAngle(ROVER_AUX_SERVO_CHANNEL, ir_sweep_deg, 0.0f, 180.0f, 500, 2500);
-        ir_sweep_step_ms = now;
-        ir_sweep_waiting = true;
-      } else if (now - ir_sweep_step_ms >= kSettleMs) {
-        bool off_hit = false;
-        bool on_hit = false;
-        mcp_ir.sample_aux(MCP_IR_AUX_OFF_MS, MCP_IR_AUX_ON_MS, off_hit, on_hit);
-        const bool hit = on_hit && !off_hit;
-        rover_periph.note_ir_rear_sample(now, ir_sweep_deg, hit);
-        ir_sweep_step++;
-        ir_sweep_step_ms = now + kBetweenMs;
-        ir_sweep_waiting = false;
-      }
-    } else {
-      ir_sweep_step_ms = 0;
-      ir_sweep_waiting = false;
-      ir_sweep_step = 0;
-      ir_sweep_deg = 90.0f;
     }
 #endif
     rover_periph.tick_sonar_map(now, rover_sonar.pan_deg(), rover_sonar.range_m(),
@@ -1807,14 +1793,9 @@ void loop() {
   ui.ir_sda_pin = MPU_SDA;
   ui.ir_scl_pin = MPU_SCL;
   ui.ir_ok = mcp_ir.ok();
-  ui.ir_in_ok = mcp_ir.front_ok();
   ui.ir_out_ok = mcp_ir.body_ok();
   ui.ir_inputs = mcp_ir.read_inputs();
-  ui.ir_front_hit = now < ir_front_flash_until;
   ui.ir_wheels_on = ir_wheels_on;
-  ui.ir_front_emit = mcp_ir.front_emitting();
-  ui.ir_body_aux_emit = mcp_ir.body_aux_emitting();
-  mcp_ir.readFrontIoState(ui.ir_front_iodir, ui.ir_front_olat, ui.ir_front_gpio);
   mcp_ir.readBodyIoState(ui.ir_body_iodir, ui.ir_body_olat, ui.ir_body_gpio);
   ui.ir_i2c_count = ir_i2c_scan.count;
   for (uint8_t i = 0; i < 8; i++) {
@@ -1844,6 +1825,10 @@ void loop() {
   ui.tof_right_ok = side_tof.right_ok();
   ui.tof_left_m = side_tof.range_left_m();
   ui.tof_right_m = side_tof.range_right_m();
+#endif
+#if defined(ROVER_VL53L8)
+  ui.tof_front_ok = front_tof.ok();
+  ui.tof_front_m = front_tof.range_center_m();
 #endif
   ui.boot_reason = boot_reason_buf[0] ? boot_reason_buf : nullptr;
   ui.boot_reason_until_ms = boot_reason_until_ms;
