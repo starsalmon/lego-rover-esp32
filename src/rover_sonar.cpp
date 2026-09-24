@@ -325,12 +325,15 @@ bool RoverSonar::tick(uint32_t now_ms, float cmd_lin, float cmd_ang, bool body_m
   // doc comment) so it keeps a steady cadence regardless of how long this
   // tick() call (and the rest of the main loop) takes.
 
-  if (now_ms - _last_read_ms >= static_cast<uint32_t>(SONAR_FORWARD_READ_MS)) {
-    _last_read_ms = now_ms;
-    const float rng = read_range();
-    if (rng > 0.0f) {
-      _last_range_m = rng;
-      note_glance_sample(_pan_deg, rng);
+  const bool reverse = cmd_lin < -0.04f;
+  if (_cal_sweep_active || reverse) {
+    if (now_ms - _last_read_ms >= static_cast<uint32_t>(SONAR_FORWARD_READ_MS)) {
+      _last_read_ms = now_ms;
+      const float rng = read_range();
+      if (rng > 0.0f) {
+        _last_range_m = rng;
+        note_glance_sample(_pan_deg, rng);
+      }
     }
   }
   if (_cal_capture_pending) {
@@ -343,7 +346,6 @@ bool RoverSonar::tick(uint32_t now_ms, float cmd_lin, float cmd_ang, bool body_m
     service_cal_capture();
   }
 
-  const bool reverse = cmd_lin < -0.04f;
   const bool turning = fabsf(cmd_ang) > 0.03f;
   _braking = false;
   const float aft_rng = _last_forward_range_m;

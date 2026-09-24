@@ -31,6 +31,8 @@ void MotionDetect::begin() {
   _wheel_ref_ticks = 0;
   _wheel_ref_ms = 0;
   _last_ms = 0;
+  _ticks_per_motor_s = 0.0f;
+  _cal_windows = 0;
   _stall = false;
   _bump = false;
 }
@@ -110,30 +112,44 @@ void MotionDetect::update(float ax, float ay, float az, float gx, float gy, floa
     return;
   }
 
-  // Stall = motors commanded but wheel IR saw no rotation at all in the window.
-  // Do NOT use yaw/IMU here — straight driving has ~0 yaw rate and the old
-  // "anchor_stall" path false-triggered constantly while cruising a hallway.
+  // Stall only when the wheels are not turning. Expected tick count is learned
+  // from real motion at this motor command (6 strips/rev), not a fixed guess.
+  // A low-but-nonzero rate is slow driving, not a stall.
+  const float window_s = static_cast<float>(window_ms) * 0.001f;
+  if (tick_delta >= 2u && motor > 0.02f && window_s > 0.2f) {
+    const float observed = static_cast<float>(tick_delta) / (window_s * motor);
+    if (_cal_windows == 0) {
+      _ticks_per_motor_s = observed;
+    } else {
+      _ticks_per_motor_s = 0.8f * _ticks_per_motor_s + 0.2f * observed;
+    }
+    if (_cal_windows < 255) {
+      _cal_windows++;
+    }
+  }
+
   const bool no_wheel_motion =
-      motor >= WHEEL_STALL_MOTOR && tick_delta < static_cast<uint32_t>(STALL_TICKS_REQUIRED);
+      motor >= WHEEL_STALL_MOTOR && tick_delta == 0u;
 
-  const float motor_norm = motor / ROVER_CRUISE_MAX_LIN;
-  const float expected_ticks_f =
-      fmaxf(1.0f, motor_norm * static_cast<float>(STALL_EXPECTED_TICKS_CRUISE));
-  const uint32_t slip_min_ticks =
-      static_cast<uint32_t>(expected_ticks_f * STALL_SLIP_RATIO);
-  const bool slip =
-      motor >= WHEEL_STALL_MOTOR && tick_delta >= static_cast<uint32_t>(STALL_TICKS_REQUIRED) &&
-      tick_delta < slip_min_ticks && slip_min_ticks > 1u;
+  bool under_rate = false;
+  uint32_t need = 0;
+  if (_cal_windows >= 3 && _ticks_per_motor_s > 0.5f) {
+    const float expected = _ticks_per_motor_s * motor * window_s;
+    need = static_cast<uint32_t>(expected * 0.25f);
+    if (need < 2u) {
+      need = 2u;
+    }
+    under_rate = motor >= WHEEL_STALL_MOTOR && tick_delta < need && expected >= 4.0f;
+  }
 
-  if (no_wheel_motion || slip) {
+  if (no_wheel_motion || under_rate) {
     _stall = true;
     _last_stall_ms = now_ms;
     _drive_since = now_ms;
-    Serial.printf("STALL %s delta=%u need>=%u win=%ums motor=%.2f\n",
-                  no_wheel_motion ? "no_ticks" : "slip", (unsigned)tick_delta,
-                  (unsigned)(no_wheel_motion ? static_cast<uint32_t>(STALL_TICKS_REQUIRED)
-                                             : slip_min_ticks),
-                  (unsigned)window_ms, motor);
+    Serial.printf("STALL %s delta=%u need>=%u win=%ums motor=%.2f cal=%.1f t/s\n",
+                  no_wheel_motion ? "no_ticks" : "under_rate", (unsigned)tick_delta,
+                  (unsigned)(no_wheel_motion ? 1u : need), (unsigned)window_ms, motor,
+                  _ticks_per_motor_s);
   }
 
   _wheel_ref_ticks = combined_ticks;

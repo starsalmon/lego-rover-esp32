@@ -23,6 +23,8 @@ class MotionDetect {
   uint32_t _wheel_ref_ticks = 0;
   uint32_t _wheel_ref_ms = 0;
   uint32_t _last_ms = 0;
+  float _ticks_per_motor_s = 0.0f;
+  uint8_t _cal_windows = 0;
   float _lp_ax = 0.0f;
   float _lp_ay = 0.0f;
   float _lp_az = 1.0f;

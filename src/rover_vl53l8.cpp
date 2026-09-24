@@ -108,10 +108,10 @@ void RoverVl53L8::poll() {
     return;
   }
 
-  // Row 0 = top of the grid, row 7 = bottom. The bottom is the floor when the
-  // module is the right way up. Floor range gets longer as the row looks up.
-  // A cell closer than the floor below it is an object. A flat short return
-  // down the whole column is a wall, not carpet.
+  // Row 0 = top, row 7 = bottom (floor). Only rows 0–4 are the forward cone;
+  // lower rows are carpet and were making columns flip between "open" (3.5 m)
+  // and a wall hit every frame.
+  constexpr uint8_t kObstRowMax = 4;
   float grid[8][8];
   for (uint8_t row = 0; row < 8; row++) {
     for (uint8_t col = 0; col < 8; col++) {
@@ -126,59 +126,29 @@ void RoverVl53L8::poll() {
 
   float inner = -1.0f;
   float cols[kCols];
-  bool any = false;
   for (uint8_t col = 0; col < kCols; col++) {
-    cols[col] = -1.0f;
-    int bot = -1;
-    float mn = 99.0f;
-    float mx = 0.0f;
-    uint8_t n = 0;
-    for (int row = 7; row >= 0; --row) {
-      const float v = grid[row][col];
-      if (v <= 0.0f) {
-        continue;
-      }
-      any = true;
-      if (bot < 0) {
-        bot = row;
-      }
-      n++;
-      mn = fminf(mn, v);
-      mx = fmaxf(mx, v);
-    }
-    if (bot < 0) {
-      continue;
-    }
-
     float obst = -1.0f;
-    // Vertical surface: every row agrees, and it is not a receding floor.
-    if (n >= 3 && mn < 1.0f && mx < mn * 1.35f) {
-      obst = mn;
-    } else {
-      float floor_ref = grid[bot][col];
-      for (int row = bot - 1; row >= 0; --row) {
-        const float v = grid[row][col];
-        if (v <= 0.0f) {
-          continue;
-        }
-        // Looking up, clear floor is farther. Closer than the floor below = object.
-        if (v < floor_ref * 0.80f) {
-          obst = (obst < 0.0f) ? v : fminf(obst, v);
-        } else {
-          floor_ref = v;
-        }
+    for (uint8_t row = 0; row <= kObstRowMax; row++) {
+      const float v = grid[row][col];
+      if (v > 0.02f) {
+        obst = (obst < 0.0f) ? v : fminf(obst, v);
       }
     }
-
-    // No object: this column is clear floor (or empty air above it).
-    cols[col] = (obst > 0.0f) ? obst : 3.5f;
+    cols[col] = obst;
 
     if (col >= 2 && col <= 5 && obst > 0.0f) {
       inner = (inner < 0.0f) ? obst : fminf(inner, obst);
     }
   }
-  if (any && inner < 0.0f) {
-    inner = 3.5f;
+
+  static float inner_filt = -1.0f;
+  if (inner > 0.0f) {
+    inner_filt = (inner_filt < 0.0f) ? inner : (0.55f * inner_filt + 0.45f * inner);
+  } else if (inner_filt > 0.0f) {
+    inner_filt = fmaxf(inner_filt * 0.82f, inner_filt - 0.04f);
+    if (inner_filt < 0.12f) {
+      inner_filt = -1.0f;
+    }
   }
 
 #if ROVER_L8_SWAP_LR
@@ -192,15 +162,15 @@ void RoverVl53L8::poll() {
   float left = -1.0f;
   float right = -1.0f;
   for (uint8_t i = 0; i < 3; i++) {
-    if (cols[i] > 0.0f) {
+    if (cols[i] > 0.02f) {
       left = (left < 0.0f) ? cols[i] : fminf(left, cols[i]);
     }
-    if (cols[kCols - 1 - i] > 0.0f) {
+    if (cols[kCols - 1 - i] > 0.02f) {
       right = (right < 0.0f) ? cols[kCols - 1 - i] : fminf(right, cols[kCols - 1 - i]);
     }
   }
 
-  _center_m = inner;
+  _center_m = inner_filt;
   _left_m = left;
   _right_m = right;
   for (uint8_t i = 0; i < kCols; i++) {

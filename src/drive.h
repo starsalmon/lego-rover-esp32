@@ -67,7 +67,7 @@ class SmoothDrive {
   // Wall-clock rates so loop jitter cannot make motion snappy.
   // ~0.15 cruise takes ~0.3 s to reach; reverse always bleeds through 0.
   static constexpr float ACCEL_PER_S = 0.50f;
-  static constexpr float BRAKE_PER_S = 0.85f;
+  static constexpr float BRAKE_PER_S = 0.42f;
   static constexpr float MIN_PWM_L = MIN_PWM_FLOOR_L;
   static constexpr float MIN_PWM_R = MIN_PWM_FLOOR_R;
   static constexpr float MOVE_EPS = 0.03f;

@@ -263,9 +263,8 @@ static void update_session_cal_sweep(uint32_t now_ms) {
     rover_sonar.set_pan_scan_enabled(false);
     return;
   }
-  // Glance the pan while driving so angled walls aren't invisible to a
-  // center-only ping. ±40° is enough to see a wall the nose is sliding along.
-  rover_sonar.set_pan_scan_enabled(true);
+  // Tail sonar is for reversing. Do not ping or sweep while driving forward.
+  rover_sonar.set_pan_scan_enabled(last_lin < -0.04f);
   if (!session_cal_sweep_triggered && !rover_sonar.cal_sweep_active()) {
     if (go_cal_sweep_pending) {
       rover_sonar.set_cal_sweep(true);
@@ -989,10 +988,22 @@ static void apply_drive(float yaw_rate, float dt) {
       (FORWARD_LINEAR_SIGN > 0.0f) ? (v < -0.03f) : (v > 0.03f);
   if (!sonar_override) {
 #if defined(ROVER_VL53L8)
-    if (front_tof.ok() && front_tof.close_ahead() && !reversing) {
-      // v=0 makes the mixer below throw away `turn`, so a steer-off-the-wall
-      // command becomes a full stop. Back off fast enough that the turn survives.
-      v = -0.12f;
+    if (front_tof.ok() && !reversing && v > 0.02f) {
+      const float fwd = front_tof.range_center_m();
+      // Brain should slow above 55 cm; ESP caps here so we never slam from cruise.
+      if (fwd > 0.02f && fwd < 0.55f) {
+        const float t = (fwd - 0.10f) / 0.45f;
+        const float cap = (t < 0.0f) ? 0.04f : (0.04f + t * 0.10f);
+        if (v > cap) {
+          v = cap;
+        }
+        if (fwd < 0.16f) {
+          v = -0.06f;
+          if (fabsf(turn) > 0.05f) {
+            turn = (turn > 0.0f) ? 0.05f : -0.05f;
+          }
+        }
+      }
     }
 #endif
   }
@@ -1021,24 +1032,23 @@ static void apply_drive(float yaw_rate, float dt) {
   float l, r;
 
   constexpr float STEER_DEAD = 0.02f;
-  constexpr float MIN_WHEEL = 0.05f;
 
-  // Never in-place spin. Opposite-wheel commands are how the waggle happens;
-  // clamp turn so both wheels keep the sign of v (or both sit at ~0).
+  // Cruise: forward dominates, steer is a nudge. A real pivot (almost no
+  // forward, a real turn) is allowed — this chassis can rotate on the spot —
+  // but a hallway command must not collapse into one.
   if (fabsf(turn) < STEER_DEAD) {
     l = v + trim_out;
     r = v - trim_out;
-  } else if (fabsf(v) < 0.12f) {
-    // A zeroed v used to drop the turn and the robot sat there. Keep an arc.
-    v = (v < -0.02f) ? -0.12f : 0.12f;
-    const float max_turn = fabsf(v) - MIN_WHEEL;
-    if (fabsf(turn) > max_turn) {
-      turn = (turn > 0.0f) ? max_turn : -max_turn;
-    }
-    l = v - turn;
-    r = v + turn;
+  } else if (fabsf(v) < 0.04f && fabsf(turn) >= STEER_DEAD) {
+    const float spin = fminf(fabsf(turn), 0.10f);
+    turn = (turn > 0.0f) ? spin : -spin;
+    l = -turn;
+    r = turn;
   } else {
-    const float max_turn = fabsf(v) - MIN_WHEEL;
+    float max_turn = fminf(0.06f, fabsf(v) * 0.45f);
+    if (max_turn < 0.03f) {
+      max_turn = 0.03f;
+    }
     if (fabsf(turn) > max_turn) {
       turn = (turn > 0.0f) ? max_turn : -max_turn;
     }
