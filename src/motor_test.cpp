@@ -55,7 +55,7 @@ static void print_help() {
   Serial.println("  R <pct> [rev]     right");
   Serial.println("  B <pct> [rev]     both");
   Serial.println("  raw L <0-255> [rev]   direct PWM count");
-  Serial.println("  freq <hz>         change PWM (production 20000; try 12000–20000)");
+  Serial.println("  freq <hz>         change PWM (production 30000; try 20000–30000)");
   Serial.println("  stop / status / scan L 5");
 #ifdef ROVER_TDISPLAY_S3
   Serial.printf("  I / i — GPIO%d IR LED DC on/off (phone camera)\n", IR_TX_PIN);

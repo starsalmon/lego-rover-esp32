@@ -3,12 +3,12 @@
 #include <Arduino.h>
 
 #ifndef PWM_FREQ_HZ
-#define PWM_FREQ_HZ 20000
+#define PWM_FREQ_HZ 30000
 #endif
 
-// Dead-zone remap: logical cmd 0..1 → duty dead_min..100% (MakerVerse @ 20 kHz).
+// Dead-zone remap: logical cmd 0..1 → duty dead_min..100% (gen-3 gearbox @ 30 kHz).
 #ifndef MIN_PWM_FLOOR
-#define MIN_PWM_FLOOR 0.58f
+#define MIN_PWM_FLOOR 0.55f
 #endif
 
 #ifndef MIN_PWM_FLOOR_L
@@ -16,7 +16,7 @@
 #endif
 
 #ifndef MIN_PWM_FLOOR_R
-#define MIN_PWM_FLOOR_R 0.57f
+#define MIN_PWM_FLOOR_R MIN_PWM_FLOOR
 #endif
 
 // Software motor direction (no rewire): set to 1 in platformio.ini, re-flash only.
