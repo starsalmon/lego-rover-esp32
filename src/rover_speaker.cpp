@@ -85,6 +85,8 @@ static const MelodyDef kMelodies[] = {
     {{NOTE(Fs5, 44), NOTE(E5, 44), NOTE(D5, 72)}, 3},
     // sonar_ping — quick “ping” (brighter)
     {{NOTE(Fs5, 16), NOTE(D5, 22)}, 2},
+    // fleet_ping — bleep bloop ping when another bot's fleet IR ID is decoded
+    {{NOTE(D5, 36), NOTE(Fs5, 36), NOTE(A5, 58)}, 3},
 };
 
 #undef NOTE

@@ -40,6 +40,9 @@
 #include "rover_mcp_ir.h"
 #endif
 #include "rover_pca9685.h"
+#include "fleet_ir_proto.h"
+#include "fleet_ir_ping.h"
+#include "fleet_ir_rx.h"
 #include "ir_tx.h"
 #if defined(ROVER_SONAR)
 #include "rover_sonar.h"
@@ -99,6 +102,8 @@ static rcl_publisher_t battery_pub;
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
 static rcl_publisher_t wheel_l_ticks_pub;
 static rcl_publisher_t wheel_r_ticks_pub;
+static rcl_publisher_t ir_detected_pub;
+static rcl_publisher_t ir_peer_pub;
 #endif
 static rcl_publisher_t sonar_range_pub;
 static rcl_publisher_t sonar_pan_pub;
@@ -130,6 +135,8 @@ static std_msgs__msg__Float32 battery_msg;
 static std_msgs__msg__Float32 servo_angle_msg;
 static std_msgs__msg__UInt32 wheel_l_ticks_msg;
 static std_msgs__msg__UInt32 wheel_r_ticks_msg;
+static std_msgs__msg__Bool ir_detected_msg;
+static std_msgs__msg__UInt8 ir_peer_msg;
 static sensor_msgs__msg__Range sonar_range_msg;
 static std_msgs__msg__Float32 sonar_pan_msg;
 static std_msgs__msg__Bool sonar_avoid_msg;
@@ -189,6 +196,8 @@ static uint32_t last_ir_scan_ms = 0;
 #ifdef ROVER_TDISPLAY_S3
 static RoverPca9685 pca9685;
 static IrTx ir_beacon;
+static FleetIrRx fleet_ir_rx;
+static FleetIrPing fleet_ir_ping;
 #if defined(ROVER_SONAR)
 static Ultrasonic sonar;
 static RoverSonar rover_sonar;
@@ -715,6 +724,12 @@ static void poll_mcp_ir(uint32_t now) {
 
   mcp_ir.tick(now);
 
+  fleet_ir_service([&]() { ir_beacon.tick(); }, [&]() {
+    if (!ir_beacon.in_tx_frame()) {
+      fleet_ir_rx.poll(mcp_ir.tsop_active());
+    }
+  });
+
   static uint32_t last_wheel_pub = 0;
   if (ros_state == RosState::kConnected && (now - last_wheel_pub >= 100)) {
     last_wheel_pub = now;
@@ -722,6 +737,17 @@ static void poll_mcp_ir(uint32_t now) {
     wheel_r_ticks_msg.data = mcp_ir.wheel_right_ticks();
     RCSOFTCHECK(rcl_publish(&wheel_l_ticks_pub, &wheel_l_ticks_msg, NULL));
     RCSOFTCHECK(rcl_publish(&wheel_r_ticks_pub, &wheel_r_ticks_msg, NULL));
+    const bool tsop = mcp_ir.tsop_active();
+    const bool peer_seen = fleet_ir_rx.detected();
+    const uint8_t peer_id = peer_seen ? fleet_ir_rx.peer_id() : FLEET_IR_PEER_NONE;
+    ir_detected_msg.data = tsop || peer_seen;
+    ir_peer_msg.data = peer_id;
+    RCSOFTCHECK(rcl_publish(&ir_detected_pub, &ir_detected_msg, NULL));
+    RCSOFTCHECK(rcl_publish(&ir_peer_pub, &ir_peer_msg, NULL));
+
+    if (fleet_ir_ping.should_ping(peer_seen, peer_id, FLEET_IR_ID, now)) {
+      rover_periph.play(RoverPeriph::kMelodyFleetPing);
+    }
   }
 }
 #endif
@@ -757,6 +783,12 @@ static bool create_entities() {
   RCCHECK(rclc_publisher_init_default(
     &wheel_r_ticks_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
     "rover/wheel/right_ticks"));
+  RCCHECK(rclc_publisher_init_default(
+    &ir_detected_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+    "rover/ir/detected"));
+  RCCHECK(rclc_publisher_init_default(
+    &ir_peer_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
+    "rover/ir/peer"));
 #endif
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_SONAR)
   RCCHECK(rclc_publisher_init_default(
@@ -1464,7 +1496,9 @@ void loop() {
 #ifdef ROVER_TDISPLAY_S3
   go_button.poll(now);
   battery.update(now);
+#if !defined(ROVER_MCP_IR)
   ir_beacon.tick();
+#endif
   ota.tick();
   if (ota.busy()) {
     // Flash writes + micro-ROS/display in the same loop starve ArduinoOTA.

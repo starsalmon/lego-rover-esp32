@@ -58,6 +58,9 @@ class RoverMcpIr {
   uint32_t wheel_right_ticks() const { return _wheel_r_ticks; }
   void reset_wheel_ticks() { _wheel_l_ticks = 0; _wheel_r_ticks = 0; }
 
+  // TSOP on GPA0 — LOW at the receiver, HIGH at MCP when idle.
+  bool tsop_active() const;
+
  private:
   static constexpr uint8_t kBodyPnpLowMask =
       static_cast<uint8_t>((1u << BODY_OUT_WHEEL_L) | (1u << BODY_OUT_WHEEL_R));

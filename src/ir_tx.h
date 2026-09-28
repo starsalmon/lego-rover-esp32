@@ -11,6 +11,8 @@ class IrTx {
   void set_enabled(bool on);
   void tick();
   bool enabled() const { return _armed; }
+  /** True while sending sync/data (not the inter-frame gap). Blind RX then. */
+  bool in_tx_frame() const;
 
  private:
   void apply_carrier(bool on);

@@ -139,7 +139,7 @@ Heading hold uses **gyro Z**. Boot log `MPU at rest: …` — **|az| ≈ 1g** if
 
 | GPA | Dir | Signal |
 |-----|-----|--------|
-| **0** | in | unused |
+| **0** | in | TSOP4138 fleet peer RX (LOW = 38 kHz seen) |
 | **1** | in | Wheel left detect |
 | **2** | in | Wheel right detect |
 | **3** | out | **VL53L8CX LPn** (HIGH = awake) |

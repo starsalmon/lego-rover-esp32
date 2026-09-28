@@ -42,6 +42,7 @@ class RoverPeriph {
   static constexpr uint8_t kMelodyMenu = RoverSpeaker::kMelodyMenu;
   static constexpr uint8_t kMelodyMenuDone = RoverSpeaker::kMelodyMenuDone;
   static constexpr uint8_t kMelodySonarPing = RoverSpeaker::kMelodySonarPing;
+  static constexpr uint8_t kMelodyFleetPing = RoverSpeaker::kMelodyFleetPing;
   static constexpr uint8_t kRingStandby = RoverRing::kModeStandby;
   static constexpr uint8_t kRingReady = RoverRing::kModeReady;
   static constexpr uint8_t kRingAuto = RoverRing::kModeAuto;

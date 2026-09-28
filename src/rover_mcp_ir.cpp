@@ -191,6 +191,13 @@ uint8_t RoverMcpIr::read_inputs() const {
   return mask;
 }
 
+bool RoverMcpIr::tsop_active() const {
+  if (!_body.ok()) {
+    return false;
+  }
+  return !readBodyInput(BODY_IN_SPARE);
+}
+
 void RoverMcpIr::tick(uint32_t now_ms) {
   (void)now_ms;
   if (!_body.ok()) return;
