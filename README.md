@@ -1,8 +1,8 @@
 # LEGO Rover — ESP32-S3 (T-Display)
 
-**ESP role:** thin real-time client — motors, IMU, pan sonar, safety cutouts, display, WiFi OTA.
+**ESP role:** thin real-time client — motors, IMU, wheel ticks, ring/speaker, safety cutouts, display, WiFi OTA. Front/side ToF live on the separate Pro S3 board (`src/pros3_tof_microros_main.cpp`).
 
-**Brain:** Raspberry Pi on the rover runs `autonomous_explore.py` over micro-ROS (UART agent). Pi also drives speaker + LED ring.
+**Brain:** NUC `brain` (192.168.3.172) runs `rover-brain` in Docker under `/data/swarm/robot-fleet` (ROS 2 Jazzy), via the WiFi micro-ROS agent on UDP 8888. The Pi is no longer used.
 
 ## Flash (OTA)
 
@@ -29,4 +29,4 @@ First-ever flash or bricked recovery: USB with the same env (omit espota) or `s3
 - `WIRING.md` — pins
 - `../lego-rover-ros2/ROVER_BEHAVIOR.md` — priorities / explore
 - `../lego-rover-ros2/PI_PERIPHERAL.md` — Pi speaker + ring
-- `../c3-mini-bot/docs/SWARM.md` — fleet (minis on dockerhost, rover on Pi)
+- `../c3-mini-bot/docs/SWARM.md` — fleet (all bots on the NUC brain)

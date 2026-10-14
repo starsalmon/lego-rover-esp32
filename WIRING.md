@@ -2,7 +2,9 @@
 
 **Source of truth:** `include/rover_pins_s3.h` (T-Display-S3) or C3 headers if you swap boards.
 
-**Production rover:** LilyGO **T-Display-S3** — speaker + ring on ESP GPIO **17/18**; brain on dockerhost.
+**Production rover:** LilyGO **T-Display-S3** drive board — speaker + ring on ESP GPIO **17/18**; brain on the NUC (192.168.3.172).
+
+> **Current Rover (2026-10-14): dual-board.** T-Display-S3 drive board (`rover-esp`, .71) = motors, MPU6050 on I2C 43/44, wheel ticks on GPIO 11/12 (direct ISR; 95 mm wheels, 60 slits, 130 mm track), LED ring, speaker, Go button — **no MCP expander, no sonar, no local ToF**. UM Pro S3 ToF board (`rover-tof`) = VL53L8CX front (own I2C, 400 kHz) + VL53L0X left/right + PCA9685, publishing `/rover/tof/*`. Brain = NUC `brain` 192.168.3.172 (`/data/swarm/robot-fleet`, ROS 2 Jazzy, micro-ROS agent UDP 8888). MCP / VL53L1X / HC-SR04 sections below describe the older single-board build.
 
 ---
 
@@ -19,8 +21,8 @@ Board: [T-Display-S3](https://github.com/Xinyuan-LilyGO/T-Display-S3)
 | **2** | Motor A PWM (**left**) |
 | **3** | Motor B DIR (**right**) |
 | **10** | Motor B PWM (**right**) |
-| **11** | Sonar TRIG (HC-SR04) |
-| **12** | Sonar ECHO (HC-SR04) — **level-shift to 3.3 V** |
+| **11** | Wheel tick left (direct ISR; was sonar TRIG) |
+| **12** | Wheel tick right (direct ISR; was sonar ECHO) |
 | **14** | Go / start-stop button (KEY, top-right) |
 | **15** | Board power on (`PIN_POWER_ON`) |
 | **16** | Battery ADC (2S divider tap) |
@@ -28,7 +30,7 @@ Board: [T-Display-S3](https://github.com/Xinyuan-LilyGO/T-Display-S3)
 | **18** | WS2812 ring DIN (8 LEDs) |
 | **21** | IR chase beacon TX (38 kHz, for mini-bot TSOP) |
 | **38** | LCD backlight |
-| **43** | I2C SDA (MPU6050 + MCP23008 + PCA9685) |
+| **43** | I2C SDA (MPU6050 only on current Rover) |
 | **44** | I2C SCL |
 
 Motor naming in firmware: **A = left**, **B = right**. `DIR high` + `PWM` = forward on that channel.
@@ -66,7 +68,7 @@ PWM **15 kHz** — better low-end torque on this driver/motors than 20 kHz (may 
 
 ## T-Display-S3 ↔ Raspberry Pi (UART — legacy)
 
-**Deprecated** for production — brain is on dockerhost; speaker + ring are on the ESP (GPIO **17** / **18**).
+**Deprecated** for production — brain is on the NUC; speaker + ring are on the ESP (GPIO **17** / **18**).
 
 | Pi header | Pi BCM | T-Display (old) |
 |-----------|--------|-----------------|
@@ -104,7 +106,7 @@ Two **VL53L1X** breakouts on the same bus as MPU/MCP/PCA. Default address is **0
 | XSHUT right | Body MCP **GPA7** (pin 7 on @0x21) |
 | GPIO1 (interrupt) | leave unconnected |
 
-**One sensor only:** wire XSHUT to **GPA6** (left) or **GPA7** (right); the other init fails harmlessly. Set `HALLWAY_WALL=left` or `right` on dockerhost.
+**One sensor only:** wire XSHUT to **GPA6** (left) or **GPA7** (right); the other init fails harmlessly. Set `HALLWAY_WALL=left` or `right` on the brain.
 
 Mount left/right pointing sideways (~90° from forward). Brain: `ROVER_MODE=hallway`, tap **Go** — holds **10 cm** (`HALLWAY_TARGET_M=0.10`).
 
