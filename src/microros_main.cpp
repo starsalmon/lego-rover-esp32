@@ -99,6 +99,22 @@ static rcl_node_t node;
 static rcl_subscription_t sub;
 static rcl_subscription_t session_sub;
 static rcl_subscription_t heartbeat_sub;
+#if defined(ROVER_DRIVE_ONLY) && defined(ROVER_PERIPH)
+// Ring distance colours from the Pro S3 ToF topics (drive board has no local ToF).
+#define RING_REMOTE_TOF 1
+static rcl_subscription_t ring_l8_sub, ring_tl_sub, ring_tr_sub;
+static std_msgs__msg__Float32MultiArray ring_l8_msg;
+static float ring_l8_buf[8];
+static std_msgs__msg__MultiArrayDimension ring_l8_dim_buf[1];
+static char ring_l8_label_buf[8];
+static sensor_msgs__msg__Range ring_tl_msg, ring_tr_msg;
+static char ring_tl_frame[24], ring_tr_frame[24];
+static volatile bool ring_l8_pending = false;
+static float ring_l8_data[8];
+static volatile float ring_side_l = -1.0f, ring_side_r = -1.0f;
+static volatile bool ring_side_pending = false;
+static uint32_t ring_l8_rx = 0, ring_side_rx = 0, ring_l8_last_ms = 0;
+#endif
 #if defined(ROVER_SONAR)
 static rcl_subscription_t sonar_cal_sweep_sub;
 #endif
@@ -468,6 +484,28 @@ void on_sonar_cal_sweep(const void *msgin) {
 }
 #endif
 
+#if defined(RING_REMOTE_TOF)
+static void on_ring_l8(const void *msgin) {
+  const auto *m = static_cast<const std_msgs__msg__Float32MultiArray *>(msgin);
+  const size_t n = m->data.size < 8 ? m->data.size : 8;
+  for (size_t i = 0; i < 8; i++) ring_l8_data[i] = (i < n) ? m->data.data[i] : -1.0f;
+  ring_l8_pending = true;
+  ring_l8_rx++;
+  ring_l8_last_ms = millis();
+}
+static void on_ring_tl(const void *msgin) {
+  const auto *m = static_cast<const sensor_msgs__msg__Range *>(msgin);
+  ring_side_l = (m->range > 0.0f && m->range < m->max_range) ? m->range : -1.0f;
+  ring_side_pending = true;
+  ring_side_rx++;
+}
+static void on_ring_tr(const void *msgin) {
+  const auto *m = static_cast<const sensor_msgs__msg__Range *>(msgin);
+  ring_side_r = (m->range > 0.0f && m->range < m->max_range) ? m->range : -1.0f;
+  ring_side_pending = true;
+  ring_side_rx++;
+}
+#endif
 void on_heartbeat(const void *msgin) {
   (void)msgin;
   // Session state comes only from /rover/session — do NOT mirror the
@@ -961,9 +999,39 @@ static bool create_entities() {
   RCCHECK(rclc_subscription_init_default(
     &heartbeat_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
     "rover/heartbeat"));
-  RCCHECK(rclc_executor_init(&executor, &support.context, 7, &allocator));
+  RCCHECK(rclc_executor_init(&executor, &support.context, 8, &allocator));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &heartbeat_sub, &heartbeat_msg, &on_heartbeat, ON_NEW_DATA));
+#if defined(RING_REMOTE_TOF)
+  ring_l8_msg.data.data = ring_l8_buf;
+  ring_l8_msg.data.size = 0;
+  ring_l8_msg.data.capacity = 8;
+  ring_l8_dim_buf[0].label.data = ring_l8_label_buf;
+  ring_l8_dim_buf[0].label.size = 0;
+  ring_l8_dim_buf[0].label.capacity = sizeof(ring_l8_label_buf);
+  ring_l8_msg.layout.dim.data = ring_l8_dim_buf;
+  ring_l8_msg.layout.dim.size = 0;
+  ring_l8_msg.layout.dim.capacity = 1;
+  ring_tl_msg.header.frame_id.data = ring_tl_frame;
+  ring_tl_msg.header.frame_id.size = 0;
+  ring_tl_msg.header.frame_id.capacity = sizeof(ring_tl_frame);
+  ring_tr_msg.header.frame_id.data = ring_tr_frame;
+  ring_tr_msg.header.frame_id.size = 0;
+  ring_tr_msg.header.frame_id.capacity = sizeof(ring_tr_frame);
+  RCCHECK(rclc_subscription_init_best_effort(
+    &ring_l8_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+    "rover/tof/l8_cols"));
+  RCCHECK(rclc_subscription_init_best_effort(
+    &ring_tl_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range), "rover/tof/left"));
+  RCCHECK(rclc_subscription_init_best_effort(
+    &ring_tr_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range), "rover/tof/right"));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &ring_l8_sub, &ring_l8_msg, &on_ring_l8, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &ring_tl_sub, &ring_tl_msg, &on_ring_tl, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &ring_tr_sub, &ring_tr_msg, &on_ring_tr, ON_NEW_DATA));
+#endif
   RCCHECK(rclc_executor_add_subscription(
     &executor, &session_sub, &session_msg, &on_session, ON_NEW_DATA));
 #if defined(ROVER_SONAR)
@@ -1045,6 +1113,11 @@ static void destroy_entities() {
   RCSOFTCHECK(rcl_subscription_fini(&sub, &node));
   RCSOFTCHECK(rcl_subscription_fini(&session_sub, &node));
   RCSOFTCHECK(rcl_subscription_fini(&heartbeat_sub, &node));
+#if defined(RING_REMOTE_TOF)
+  RCSOFTCHECK(rcl_subscription_fini(&ring_l8_sub, &node));
+  RCSOFTCHECK(rcl_subscription_fini(&ring_tl_sub, &node));
+  RCSOFTCHECK(rcl_subscription_fini(&ring_tr_sub, &node));
+#endif
   RCSOFTCHECK(rcl_publisher_fini(&imu_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&drive_diag_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&bump_pub, &node));
@@ -2216,7 +2289,8 @@ void loop() {
       int n = snprintf(drive_diag_buf, sizeof(drive_diag_buf),
                "t=%lu mpu=%d imu_retry=%lu imu_gate=%s i2c43_44=[%s] mcp=%d "
                "ent=%d sup=%d up=%lu lost=%lu fail=%lu@%d rc=%d miss=%lu rssi=%d "
-               "ticksL=%lu ticksR=%lu tick_pubs=%lu tick_gate=%s bat=%.2f heap=%u",
+               "ticksL=%lu ticksR=%lu tick_pubs=%lu tick_gate=%s bat=%.2f heap=%u ring_l8_rx=%lu "
+               "ring_l8_age=%ld ring_side_rx=%lu ring_front=%.2f",
                (unsigned long)now, (int)mpu.ok(), (unsigned long)imu_retry_count, imu_gate,
                scan, mcp_ok, (int)entities_ok, (int)support_ok,
                (unsigned long)uros_diag_up, (unsigned long)uros_diag_lost,
@@ -2229,7 +2303,16 @@ void loop() {
 #else
                0.0f,
 #endif
-               (unsigned)ESP.getFreeHeap());
+               (unsigned)ESP.getFreeHeap(),
+#if defined(RING_REMOTE_TOF)
+               (unsigned long)ring_l8_rx,
+               ring_l8_last_ms ? (long)(now - ring_l8_last_ms) : -1L,
+               (unsigned long)ring_side_rx,
+               ring_l8_data[3] > 0.0f ? ring_l8_data[3] : -1.0f
+#else
+               0UL, -1L, 0UL, -1.0f
+#endif
+               );
       if (n < 0) n = 0;
       if (n >= (int)sizeof(drive_diag_buf)) n = sizeof(drive_diag_buf) - 1;
       drive_diag_msg.data.data = drive_diag_buf;
@@ -2318,6 +2401,18 @@ void loop() {
     r = t_m;
 #endif
     rover_periph.note_side_tof(now, l, r);
+  }
+#endif
+#if defined(RING_REMOTE_TOF)
+  if (ring_l8_pending) {
+    ring_l8_pending = false;
+    float c[8];
+    for (int i = 0; i < 8; i++) c[i] = ring_l8_data[i];
+    rover_periph.note_l8_cols(now, c, 8);
+  }
+  if (ring_side_pending) {
+    ring_side_pending = false;
+    rover_periph.note_side_tof(now, ring_side_l, ring_side_r);
   }
 #endif
   rover_periph.tick_distance_ring(now);

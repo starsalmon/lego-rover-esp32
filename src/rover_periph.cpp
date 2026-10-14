@@ -135,25 +135,26 @@ void RoverPeriph::note_l8_cols(uint32_t now_ms, const float* cols, uint8_t n) {
   }
   // Front half of the 8-LED ring, left → right: +45°, 0°, 315°, 270°.
   // L8 FOV is ~45°; we stretch it across the front 180° so empty vs wall is obvious.
-  const int leds[4] = {
+  // Was 4 LEDs incl. 270°, which is the left side-ToF LED (side paint swaps L/R),
+  // so the L8 overwrote it every frame. Now 3 front LEDs: cols 0-2 / 3-4 / 5-7.
+  const int leds[3] = {
       bearing_to_led(45.0f),
       bearing_to_led(0.0f),
       bearing_to_led(315.0f),
-      bearing_to_led(270.0f),
   };
+  static const uint8_t col_lo[3] = {0, 3, 5};
+  static const uint8_t col_hi[3] = {2, 4, 7};
   for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
     _l8_bins[i] = 255;
   }
   bool any = false;
-  for (uint8_t b = 0; b < 4; b++) {
-    const float a = cols[b * 2];
-    const float c = cols[b * 2 + 1];
+  for (uint8_t b = 0; b < 3; b++) {
     float m = -1.0f;
-    if (a > 0.0f) {
-      m = a;
-    }
-    if (c > 0.0f) {
-      m = (m < 0.0f) ? c : fminf(m, c);
+    for (uint8_t k = col_lo[b]; k <= col_hi[b]; k++) {
+      const float v = cols[k];
+      if (v > 0.0f) {
+        m = (m < 0.0f) ? v : fminf(m, v);
+      }
     }
     const int led = leds[b];
     if (led < 0 || led >= ROVER_RING_COUNT) {
@@ -199,13 +200,13 @@ void RoverPeriph::tick_distance_ring(uint32_t now_ms) {
   }
   // L8 publishes about every 1.5 s. Hold keeps the nose colors up across that gap.
   if (now_ms <= _l8_hold_until_ms) {
-    const int l8leds[4] = {
+    // Front LEDs only; 270° is the left side-ToF LED (side paint swaps L/R).
+    const int l8leds[3] = {
         bearing_to_led(45.0f),
         bearing_to_led(0.0f),
         bearing_to_led(315.0f),
-        bearing_to_led(270.0f),
     };
-    for (uint8_t b = 0; b < 4; b++) {
+    for (uint8_t b = 0; b < 3; b++) {
       const int led = l8leds[b];
       if (led >= 0 && led < ROVER_RING_COUNT) {
         frame[led] = _l8_bins[led];
@@ -351,13 +352,13 @@ void RoverPeriph::tick_sonar_map(uint32_t now_ms, float pan_deg, float range_m, 
   // L8 nose: front half of the ring (left→right 45°, 0°, 315°, 270°).
   // 255 = no target (open space or failed zone) — leave that LED dark.
   if (now_ms <= _l8_hold_until_ms) {
-    const int l8leds[4] = {
+    // Front LEDs only; 270° is the left side-ToF LED (side paint swaps L/R).
+    const int l8leds[3] = {
         bearing_to_led(45.0f),
         bearing_to_led(0.0f),
         bearing_to_led(315.0f),
-        bearing_to_led(270.0f),
     };
-    for (uint8_t b = 0; b < 4; b++) {
+    for (uint8_t b = 0; b < 3; b++) {
       const int led = l8leds[b];
       if (led >= 0 && led < ROVER_RING_COUNT) {
         frame[led] = _l8_bins[led];
