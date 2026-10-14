@@ -1,32 +1,27 @@
-# LEGO Rover — ESP32-S3 (T-Display)
+# LEGO Rover — ESP32-S3 firmware
 
-**ESP role:** thin real-time client — motors, IMU, wheel ticks, ring/speaker, safety cutouts, display, WiFi OTA. Front/side ToF live on the separate Pro S3 board (`src/pros3_tof_microros_main.cpp`).
+Rover is dual-board, both thin WiFi micro-ROS clients of the brain:
 
-**Brain:** NUC `brain` (192.168.3.172) runs `rover-brain` in Docker under `/data/swarm/robot-fleet` (ROS 2 Jazzy), via the WiFi micro-ROS agent on UDP 8888. The Pi is no longer used.
+- **T-Display-S3 drive board** (`rover-esp`, .71) — motors, MPU6050 IMU, wheel ticks, LED ring, speaker, Go/E-stop, display, local safety. Env `s3_tdisplay_microros_rover_drive` (`src/microros_main.cpp`).
+- **Pro S3 ToF board** (`rover-tof`) — VL53L8CX front, VL53L0X sides, PCA9685. Env `um_pros3_tof_microros` (`src/pros3_tof_microros_main.cpp`).
 
-## Flash (OTA)
+**Brain:** NUC `brain` (192.168.3.172) runs `rover-brain` in Docker under `/data/swarm/robot-fleet` (ROS 2 Jazzy), micro-ROS agent on UDP 8888.
 
-```bash
-cd lego-rover-esp32
-pio run -e s3_tdisplay_microros_rover_ota -t upload
-```
+## Flash
 
-First-ever flash or bricked recovery: USB with the same env (omit espota) or `s3_erase` then USB.
+See `WIRING.md` → Flash. Turn `allow_drive` OFF before an OTA.
 
 ## Use
 
-1. Power rover (ESP + Pi).
-2. Pi agent: `systemctl status rover-agent` (or `go_auto.sh` starts the stack).
-3. Tap **Go** on ESP display → Pi session active → explore publishes `/cmd_vel`.
-4. ESP hard-brakes on imminent collision; wander/escape logic is on the Pi.
+1. Power the rover (both boards join WiFi and the agent).
+2. `allow_drive` ON via MQTT `lab/robots/allow_drive/set`.
+3. Tap **Go** (or publish `/rover/button` true) → brain session starts → explore publishes `/cmd_vel`.
+4. The drive board enforces E-stop, stall lockout and cmd timeout; explore/escape logic is on the brain.
 
-## Deprecated
-
-`s3_standalone_bench` — old ESP-local wander sketch. Not production.
+Diagnostics: `/rover/drive_diag` (drive board, 1 Hz).
 
 ## Docs
 
-- `WIRING.md` — pins
-- `../lego-rover-ros2/ROVER_BEHAVIOR.md` — priorities / explore
-- `../lego-rover-ros2/PI_PERIPHERAL.md` — Pi speaker + ring
-- `../c3-mini-bot/docs/SWARM.md` — fleet (all bots on the NUC brain)
+- `WIRING.md` — pins for both boards
+- `../lego-rover-ros2/ROVER_BEHAVIOR.md` — explore behaviour
+- `../c3-mini-bot/docs/SWARM.md` — fleet
