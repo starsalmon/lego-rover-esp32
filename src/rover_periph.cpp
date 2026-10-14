@@ -15,7 +15,12 @@ bool RoverPeriph::begin(int speaker_pin, int ring_pin) {
     _tof_bins[i] = 255;
     _l8_bins[i] = 255;
   }
-  _ring.set_mode(kRingStandby);
+  uint8_t blank[ROVER_RING_COUNT];
+  for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
+    blank[i] = 255;
+  }
+  // Dim "no range" until L8 / side ToF arrive. Not the standby hue show.
+  _ring.sonar_frame(blank, ROVER_RING_COUNT, ROVER_RING_COUNT);
   if (spk || ring) {
     Serial.printf("RoverPeriph speaker GPIO %d=%s ring GPIO %d=%s\n", speaker_pin,
                   spk ? "OK" : "--", ring_pin, ring ? "OK" : "--");
@@ -70,7 +75,7 @@ void RoverPeriph::notify_ready() {
 void RoverPeriph::notify_session(bool active) {
   _session_active = active;
   play(active ? kMelodyAutoStart : kMelodyAutoStop);
-  ring_mode(active ? kRingAuto : kRingStandby);
+  // Do not replace the distance map with the auto/standby hue show.
   if (active) {
     _ring.flash(RoverRing::kFlashStart, 700);
   } else {
@@ -160,11 +165,54 @@ void RoverPeriph::note_l8_cols(uint32_t now_ms, const float* cols, uint8_t n) {
     }
   }
   if (any) {
-    _l8_hold_until_ms = now_ms + 400;
+    _l8_hold_until_ms = now_ms + 2000;
   } else {
     // No targets: still a reading. Front LEDs go dark so "empty L8" is visible.
-    _l8_hold_until_ms = now_ms + 400;
+    _l8_hold_until_ms = now_ms + 2000;
   }
+}
+
+void RoverPeriph::tick_distance_ring(uint32_t now_ms) {
+  static uint32_t last_ms = 0;
+  if (now_ms - last_ms < 50) {
+    return;
+  }
+  last_ms = now_ms;
+
+  if (now_ms > _tof_hold_until_ms) {
+    for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
+      _tof_bins[i] = 255;
+    }
+  }
+
+  uint8_t frame[ROVER_RING_COUNT];
+  for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
+    frame[i] = 255;
+  }
+  const int led_leftmost = bearing_to_led(90.0f);
+  const int led_rightmost = bearing_to_led(270.0f);
+  if (led_leftmost >= 0 && led_leftmost < ROVER_RING_COUNT && _tof_bins[led_leftmost] < 255) {
+    frame[led_leftmost] = _tof_bins[led_leftmost];
+  }
+  if (led_rightmost >= 0 && led_rightmost < ROVER_RING_COUNT && _tof_bins[led_rightmost] < 255) {
+    frame[led_rightmost] = _tof_bins[led_rightmost];
+  }
+  // L8 publishes about every 1.5 s. Hold keeps the nose colors up across that gap.
+  if (now_ms <= _l8_hold_until_ms) {
+    const int l8leds[4] = {
+        bearing_to_led(45.0f),
+        bearing_to_led(0.0f),
+        bearing_to_led(315.0f),
+        bearing_to_led(270.0f),
+    };
+    for (uint8_t b = 0; b < 4; b++) {
+      const int led = l8leds[b];
+      if (led >= 0 && led < ROVER_RING_COUNT) {
+        frame[led] = _l8_bins[led];
+      }
+    }
+  }
+  sonar_frame(frame, ROVER_RING_COUNT, ROVER_RING_COUNT);
 }
 
 void RoverPeriph::tick_ir_map(uint32_t now_ms, bool front_l, bool front_r) {

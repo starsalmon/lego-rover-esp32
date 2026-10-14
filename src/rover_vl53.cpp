@@ -142,17 +142,27 @@ static bool begin_chip_l1x(RoverMcpIr* mcp, bool* left_ok, bool* right_ok) {
   *right_ok = false;
 
   if (mcp) {
+    // One sensor at a time on 0x29. If left init fails, XSHUT it off before
+    // enabling right — otherwise both sit on 0x29 and neither enumerates.
     mcp->set_vl53_xshut(true, false);
-    delay(20);
+    delay(50);
     {
       RoverI2cGuard guard;
       *left_ok = setup_one_l1x(g_l1_left, VL53L_ADDR_L);
     }
-    mcp->set_vl53_xshut(true, true);
-    delay(20);
+    if (!*left_ok) {
+      mcp->set_vl53_xshut(false, false);
+      delay(20);
+    }
+    mcp->set_vl53_xshut(*left_ok, true);
+    delay(50);
     {
       RoverI2cGuard guard;
       *right_ok = setup_one_l1x(g_l1_right, VL53L_ADDR_R);
+    }
+    if (!*right_ok) {
+      mcp->set_vl53_xshut(*left_ok, false);
+      delay(10);
     }
   }
   if (!*left_ok && !*right_ok) {
@@ -170,16 +180,24 @@ static bool begin_chip_l0x(RoverMcpIr* mcp, bool* left_ok, bool* right_ok) {
 
   if (mcp) {
     mcp->set_vl53_xshut(true, false);
-    delay(20);
+    delay(50);
     {
       RoverI2cGuard guard;
       *left_ok = setup_one_l0x(g_l0_left, VL53L_ADDR_L);
     }
-    mcp->set_vl53_xshut(true, true);
-    delay(20);
+    if (!*left_ok) {
+      mcp->set_vl53_xshut(false, false);
+      delay(20);
+    }
+    mcp->set_vl53_xshut(*left_ok, true);
+    delay(50);
     {
       RoverI2cGuard guard;
       *right_ok = setup_one_l0x(g_l0_right, VL53L_ADDR_R);
+    }
+    if (!*right_ok) {
+      mcp->set_vl53_xshut(*left_ok, false);
+      delay(10);
     }
   }
   if (!*left_ok && !*right_ok) {
@@ -207,7 +225,7 @@ bool RoverVl53::begin(RoverMcpIr* mcp) {
   _right_m = -1.0f;
 
   set_xshut(false, false);
-  delay(20);
+  delay(50);  // hard-cycle rails / MCP XSHUT need >20 ms settle (flaky L=-- R=--)
 
   bool p29 = false;
   {
@@ -252,13 +270,19 @@ void RoverVl53::poll() {
   if (!_ok) {
     return;
   }
-  RoverI2cGuard guard;
+  // Separate locks per sensor so imu_diag can sneak MPU reads between them.
   if (g_chip == Vl53Chip::kL1x) {
     if (_left_ok) {
-      _left_m = mm_to_m(g_l1_left.read(false));
+      RoverI2cGuard guard;
+      if (guard) {
+        _left_m = mm_to_m(g_l1_left.read(false));
+      }
     }
     if (_right_ok) {
-      _right_m = mm_to_m(g_l1_right.read(false));
+      RoverI2cGuard guard;
+      if (guard) {
+        _right_m = mm_to_m(g_l1_right.read(false));
+      }
     }
   } else if (g_chip == Vl53Chip::kL0x) {
     static uint16_t l_hist[3] = {};
@@ -270,10 +294,16 @@ void RoverVl53::poll() {
     static float l_last = -1.0f;
     static float r_last = -1.0f;
     if (_left_ok) {
-      _left_m = l0x_filtered_m(g_l0_left, l_hist, l_idx, l_last, l_invalid);
+      RoverI2cGuard guard;
+      if (guard) {
+        _left_m = l0x_filtered_m(g_l0_left, l_hist, l_idx, l_last, l_invalid);
+      }
     }
     if (_right_ok) {
-      _right_m = l0x_filtered_m(g_l0_right, r_hist, r_idx, r_last, r_invalid);
+      RoverI2cGuard guard;
+      if (guard) {
+        _right_m = l0x_filtered_m(g_l0_right, r_hist, r_idx, r_last, r_invalid);
+      }
     }
   }
 }

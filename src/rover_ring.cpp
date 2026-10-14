@@ -113,7 +113,12 @@ void RoverRing::sonar_frame(const uint8_t* dist_cm, uint8_t count, uint8_t sweep
   for (uint8_t i = 0; i < n; i++) {
     _sonar_bins[i] = dist_cm[i];
   }
-  _sonar_sweep = sweep_led % _count;
+  // sweep_led >= count means "no pan cursor" (distance-only frame).
+  if (sweep_led >= _count) {
+    _sonar_sweep = 255;
+  } else {
+    _sonar_sweep = sweep_led % _count;
+  }
   _mode = kModeSonar;
 }
 

@@ -2,6 +2,10 @@
 
 #include <stdint.h>
 
+#ifndef ROVER_DIAG_PERIOD_MS
+#define ROVER_DIAG_PERIOD_MS 100
+#endif
+
 /** Crash breadcrumbs in RTC RAM (survives watchdog/panic reboot, not power-off). */
 enum RoverCkpt : uint32_t {
   kCkptNone = 0,
@@ -45,16 +49,37 @@ struct RoverDiagSample {
 void rover_diag_begin(const char* reset_reason);
 
 /** Call after WiFi is up so BOOT/prev_ckpt reaches UDP telem on dockerhost. */
-void rover_diag_wifi_ready();
+/** After WiFi up — includes reset reason (BOOT line is often pre-WiFi / lost). */
+void rover_diag_wifi_ready(const char* reset_reason = nullptr);
+
+/**
+ * After WiFi up: if last reset was panic/WDT and a flash coredump exists,
+ * UDP/Serial-emit PANIC_CORE + PANIC_BT lines (PC list) then erase the dump.
+ * Safe no-op if no dump / not a panic reset. Called from rover_diag_wifi_ready().
+ */
+void rover_diag_emit_panic_coredump(const char* reset_reason);
 
 /** Safe from any task — no Serial, only RTC store. */
 void rover_diag_ckpt(RoverCkpt id, uint32_t arg = 0);
 
-/** Main loop only — structured 1 Hz line + optional events. */
+/** Structured DIAG line (target ~10 Hz; safe from imu_diag FreeRTOS task). */
 void rover_diag_tick(const RoverDiagSample& sample);
 
-/** Main loop only — immediate EVENT line (cal transitions, etc.). */
+/** Immediate EVENT line (cal transitions, etc.). Prefer main/connected contexts. */
 void rover_diag_event(const char* fmt, ...);
 
 /** Optional: pan FreeRTOS task for stack watermark in DIAG line. */
 void rover_diag_set_pan_task(void* task_handle);
+
+/**
+ * Global WiFiUDP / lwIP serialization for DIAG + micro-ROS transport.
+ * microros_main wires these to the recursive uros_mu. Transport read/write and
+ * DIAG UDP must both take this lock — 15ms fail-fast was not enough.
+ */
+using RoverDiagNetTake = bool (*)(uint32_t timeout_ms);
+using RoverDiagNetGive = void (*)();
+void rover_diag_set_net_guard(RoverDiagNetTake take, RoverDiagNetGive give);
+
+/** C API for micro_ros_transport.cpp (and DIAG). timeout_ms=0 → no wait. */
+extern "C" bool rover_net_lock(uint32_t timeout_ms);
+extern "C" void rover_net_unlock(void);

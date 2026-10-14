@@ -54,6 +54,10 @@ float HeadingHold::cal_progress() const {
 }
 
 void HeadingHold::update(float yaw_rate_rad_s, float dt_s, bool stationary) {
+  // One missed read must not be integrated across the whole gap.
+  if (dt_s > 0.05f) {
+    dt_s = 0.0f;
+  }
   if (dt_s > 0.0f) {
     _cal_elapsed_s += dt_s;
   }
@@ -81,7 +85,13 @@ void HeadingHold::update(float yaw_rate_rad_s, float dt_s, bool stationary) {
     _bias += (yaw_rate_rad_s - _bias) / static_cast<float>(_bias_n);
   }
 
-  _last_rate_rad_s = yaw_rate_rad_s - _bias;
+  const float debiased = yaw_rate_rad_s - _bias;
+  // Torn I2C word or a full-scale glitch. A real yaw on this chassis is far slower.
+  if (fabsf(debiased) > 4.0f) {
+    _last_rate_rad_s = 0.0f;
+    return;
+  }
+  _last_rate_rad_s = debiased;
   if (dt_s > 0.0f) {
     _angle_z_deg += _last_rate_rad_s * 57.2957795f * dt_s;
   }

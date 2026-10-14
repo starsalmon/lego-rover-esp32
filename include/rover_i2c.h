@@ -21,12 +21,24 @@ inline SemaphoreHandle_t rover_i2c_mutex_handle() {
   return m;
 }
 
-/** RAII guard: take the shared I2C mutex on construction, release on scope exit. */
+/** RAII guard: take the shared I2C mutex on construction, release on scope exit.
+ *  Optional timeout: if take fails, ok() is false and destructor is a no-op.
+ *  IMU uses a short timeout so a long L8 dump cannot stall the 20 Hz tick. */
 struct RoverI2cGuard {
-  RoverI2cGuard() { xSemaphoreTake(rover_i2c_mutex_handle(), portMAX_DELAY); }
-  ~RoverI2cGuard() { xSemaphoreGive(rover_i2c_mutex_handle()); }
+  explicit RoverI2cGuard(TickType_t ticks = portMAX_DELAY)
+      : _ok(xSemaphoreTake(rover_i2c_mutex_handle(), ticks) == pdTRUE) {}
+  ~RoverI2cGuard() {
+    if (_ok) {
+      xSemaphoreGive(rover_i2c_mutex_handle());
+    }
+  }
+  bool ok() const { return _ok; }
+  explicit operator bool() const { return _ok; }
   RoverI2cGuard(const RoverI2cGuard &) = delete;
   RoverI2cGuard &operator=(const RoverI2cGuard &) = delete;
+
+ private:
+  bool _ok;
 };
 
 /** One shared I2C bus for MPU6050, MCP23008, PCA9685. Always applies a Wire timeout. */

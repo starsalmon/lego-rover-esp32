@@ -1,9 +1,11 @@
 #include <Arduino.h>
+#include <stdint.h>
 #include <esp_system.h>
 #include <micro_ros_platformio.h>
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <Preferences.h>
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
@@ -11,6 +13,7 @@
 #include <rmw_microros/ping.h>
 #include <geometry_msgs/msg/twist.h>
 #include <limits>
+#include <math.h>
 #include <sensor_msgs/msg/imu.h>
 #include <sensor_msgs/msg/range.h>
 #include <std_msgs/msg/bool.h>
@@ -18,6 +21,7 @@
 #include <std_msgs/msg/float32.h>
 #include <std_msgs/msg/float32_multi_array.h>
 #include <std_msgs/msg/u_int32.h>
+#include <std_msgs/msg/string.h>
 
 #include "drive.h"
 #include "heading_hold.h"
@@ -27,6 +31,12 @@
 #include "rover_board_power.h"
 #include "status_led.h"
 #include "rover_diag.h"
+
+// TEST: wheel sensors direct on the sonar pins. Ring and sonar stay off.
+static volatile uint32_t direct_left_ticks = 0;
+static volatile uint32_t direct_right_ticks = 0;
+static void IRAM_ATTR direct_left_isr() { direct_left_ticks++; }
+static void IRAM_ATTR direct_right_isr() { direct_right_ticks++; }
 
 #ifdef ROVER_TDISPLAY_S3
 #include "battery.h"
@@ -93,6 +103,11 @@ static rcl_subscription_t heartbeat_sub;
 static rcl_subscription_t sonar_cal_sweep_sub;
 #endif
 static rcl_publisher_t imu_pub;
+static rcl_publisher_t drive_diag_pub;
+static std_msgs__msg__String drive_diag_msg;
+static char drive_diag_buf[384];
+static uint32_t imu_retry_count = 0;
+static uint32_t tick_pub_count = 0;
 static rcl_publisher_t bump_pub;
 static rcl_publisher_t stall_pub;
 static rcl_publisher_t button_pub;
@@ -231,7 +246,32 @@ static float last_heading_trim = 0.0f;
 static float last_imu_yaw_deg = 0.0f;
 static float last_imu_gz_dps = 0.0f;
 static float last_imu_az_g = 0.0f;
+static float last_imu_ax = 0.0f;
+static float last_imu_ay = 0.0f;
+static float last_imu_gx = 0.0f;
+static float last_imu_gy = 0.0f;
+static float last_imu_gz = 0.0f;
+static float last_yaw_rate = 0.0f;
+static bool last_imu_ok = false;
 static bool imu_rest_logged = false;
+// micro-ROS rcl_publish / executor are not re-entrant across tasks.
+static SemaphoreHandle_t uros_mu = nullptr;
+// HeadingHold update (imu task) vs correct/disarm (main / callbacks).
+static SemaphoreHandle_t heading_mu = nullptr;
+static TaskHandle_t imu_diag_task_handle = nullptr;
+// Defer heavy/ROS/Serial work from imu_diag to loop() — avoids stack blowups +
+// cross-task force_stop / periph / Serial from the high-rate task.
+static volatile bool imu_bump_pending = false;
+static volatile bool imu_stall_pending = false;
+// Defer DIAG Serial/UDP emit to loop() so imu_diag stays on its 25 ms tick.
+static volatile bool imu_diag_line_pending = false;
+static RoverDiagSample imu_diag_line_sample{};
+#if defined(ROVER_PERIPH) && defined(ROVER_VL53L8)
+static volatile bool l8_cols_pending = false;
+static float l8_cols_pending_data[8] = {};
+static uint32_t l8_cols_pending_ms = 0;
+#endif
+static volatile bool tof_soft_reinit_busy = false;
 #if defined(ROVER_SONAR)
 static bool sonar_drive_override = false;
 static float sonar_drive_lin = 0.0f;
@@ -325,20 +365,64 @@ enum class RosState { kWaitAgent, kConnect, kConnected, kDisconnect };
 
 static RosState ros_state = RosState::kWaitAgent;
 static bool entities_ok = false;
+// support_ok: rclc_support_init succeeded (session exists) even if later entity
+// creation failed. destroy_entities must tear that partial state down too.
+static bool support_ok = false;
+#ifndef ROVER_UROS_PING_PERIOD_MS
+#define ROVER_UROS_PING_PERIOD_MS 200
+#endif
+#ifndef ROVER_UROS_PING_MS
+#define ROVER_UROS_PING_MS 200
+#endif
+#ifndef ROVER_UROS_PING_MISS
+#define ROVER_UROS_PING_MISS 6
+#endif
+static uint8_t uros_ping_miss = 0;
+static uint32_t uros_diag_up = 0, uros_diag_lost = 0, uros_diag_fail = 0,
+                uros_diag_miss_total = 0;
+static int uros_diag_fail_line = 0, uros_diag_fail_rc = 0;
 
 #define RCCHECK(fn) \
   { \
     rcl_ret_t rc = fn; \
     if (rc != RCL_RET_OK) { \
+      uros_diag_fail_line = __LINE__; \
+      uros_diag_fail_rc = (int)rc; \
       Serial.printf("micro-ROS init failed rc=%d at %s:%d\n", (int)rc, __FILE__, \
                     __LINE__); \
       return false; \
     } \
   }
+static bool uros_lock(TickType_t ticks = pdMS_TO_TICKS(40)) {
+  if (uros_mu == nullptr) {
+    return true;
+  }
+  return xSemaphoreTakeRecursive(uros_mu, ticks) == pdTRUE;
+}
+static void uros_unlock() {
+  if (uros_mu != nullptr) {
+    xSemaphoreGiveRecursive(uros_mu);
+  }
+}
+static bool heading_lock(TickType_t ticks = pdMS_TO_TICKS(20)) {
+  if (heading_mu == nullptr) {
+    return true;
+  }
+  return xSemaphoreTakeRecursive(heading_mu, ticks) == pdTRUE;
+}
+static void heading_unlock() {
+  if (heading_mu != nullptr) {
+    xSemaphoreGiveRecursive(heading_mu);
+  }
+}
+
 #define RCSOFTCHECK(fn) \
   { \
-    rcl_ret_t rc = fn; \
-    (void)rc; \
+    if (uros_lock()) { \
+      rcl_ret_t rc = fn; \
+      (void)rc; \
+      uros_unlock(); \
+    } \
   }
 
 void on_cmd(const void *msgin);
@@ -362,7 +446,10 @@ void on_session(const void *msgin) {
       drv.set_target(0.0f, 0.0f);
       last_lin = 0.0f;
       last_ang = 0.0f;
-      heading.disarm();
+      if (heading_lock()) {
+        heading.disarm();
+        heading_unlock();
+      }
 #if defined(ROVER_SONAR)
       rover_sonar.set_cal_sweep(false);
       rover_sonar.set_pan_scan_enabled(false);
@@ -392,10 +479,19 @@ void on_heartbeat(const void *msgin) {
 
 static void spin_ros_input() {
   if (ros_state != RosState::kConnected) return;
-  const int spins = pi_session_sub_value ? 2 : 8;
+  // Idle used to burn 8x5ms (~40ms) every loop; that alone capped rates ~3 Hz.
+  // Keep cmd_vel responsive when session/driving; stay light when parked.
+  constexpr uint32_t CMD_TIMEOUT_MS = 400;
+  const bool driving = (millis() - last_drive_ms) <= CMD_TIMEOUT_MS;
+  const bool active = pi_session_sub_value || driving;
+  const int spins = active ? 3 : 1;
+  const int spin_ms = active ? 3 : 2;
+  if (!uros_lock()) return;
   for (int i = 0; i < spins; i++) {
-    RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(5)));
+    rcl_ret_t rc = rclc_executor_spin_some(&executor, RCL_MS_TO_NS(spin_ms));
+    (void)rc;
   }
+  uros_unlock();
 }
 
 static void update_pi_bridge_state(uint32_t now) {
@@ -648,7 +744,7 @@ static void handle_go_button_event(RoverButtonEvent ev, uint32_t now_ms) {
       button_msg.data = true;
       RCSOFTCHECK(rcl_publish(&button_pub, &button_msg, NULL));
       Serial.println("EVENT button -> /rover/button");
-      for (int i = 0; i < 12; i++) {
+      for (int i = 0; i < 4; i++) {
         spin_ros_input();
       }
     }
@@ -659,7 +755,10 @@ static void handle_go_button_event(RoverButtonEvent ev, uint32_t now_ms) {
 static void force_stop(const char *reason) {
   last_lin = 0;
   last_ang = 0;
-  heading.disarm();
+  if (heading_lock()) {
+    heading.disarm();
+    heading_unlock();
+  }
 #if defined(ROVER_SONAR)
   sonar_drive_override = false;
   sonar_drive_lin = 0.0f;
@@ -711,6 +810,20 @@ static void poll_mcp_ir(uint32_t now) {
       mcp_ir.begin(MPU_SDA, MPU_SCL);
     }
   }
+  {
+    // Wheel ticks come from direct GPIO ISRs, not the MCP expander — publish
+    // them even when the MCP IR board is missing (was gated on mcp_ir.ok()).
+    static uint32_t last_tick_pub = 0;
+    if (ros_state == RosState::kConnected && entities_ok &&
+        (now - last_tick_pub >= 100)) {
+      last_tick_pub = now;
+      wheel_l_ticks_msg.data = direct_left_ticks;
+      wheel_r_ticks_msg.data = direct_right_ticks;
+      RCSOFTCHECK(rcl_publish(&wheel_l_ticks_pub, &wheel_l_ticks_msg, NULL));
+      RCSOFTCHECK(rcl_publish(&wheel_r_ticks_pub, &wheel_r_ticks_msg, NULL));
+      tick_pub_count++;
+    }
+  }
   if (!mcp_ir.ok()) {
     return;
   }
@@ -733,10 +846,6 @@ static void poll_mcp_ir(uint32_t now) {
   static uint32_t last_wheel_pub = 0;
   if (ros_state == RosState::kConnected && (now - last_wheel_pub >= 100)) {
     last_wheel_pub = now;
-    wheel_l_ticks_msg.data = mcp_ir.wheel_left_ticks();
-    wheel_r_ticks_msg.data = mcp_ir.wheel_right_ticks();
-    RCSOFTCHECK(rcl_publish(&wheel_l_ticks_pub, &wheel_l_ticks_msg, NULL));
-    RCSOFTCHECK(rcl_publish(&wheel_r_ticks_pub, &wheel_r_ticks_msg, NULL));
     const bool tsop = mcp_ir.tsop_active();
     const bool peer_seen = fleet_ir_rx.detected();
     const uint8_t peer_id = peer_seen ? fleet_ir_rx.peer_id() : FLEET_IR_PEER_NONE;
@@ -756,11 +865,15 @@ static void poll_mcp_ir(uint32_t now) {
 static bool create_entities() {
   allocator = rcl_get_default_allocator();
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+  support_ok = true;
   RCCHECK(rclc_node_init_default(&node, "lego_rover_esp32", "", &support));
   RCCHECK(rclc_subscription_init_default(
     &sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel"));
   RCCHECK(rclc_publisher_init_default(
     &imu_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu), "imu/data"));
+  RCCHECK(rclc_publisher_init_default(
+    &drive_diag_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+    "rover/drive_diag"));
   RCCHECK(rclc_publisher_init_default(
     &bump_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "rover/bump"));
   RCCHECK(rclc_publisher_init_default(
@@ -919,7 +1032,12 @@ static bool create_entities() {
 }
 
 static void destroy_entities() {
-  if (!entities_ok) return;
+  // Previously returned when !entities_ok, which leaked the session/node after a
+  // partial create_entities failure and wedged every later reconnect.
+  if (!entities_ok && !support_ok) return;
+  // Serialize against imu_diag_task rcl_publish / main spin.
+  (void)uros_lock(pdMS_TO_TICKS(200));
+  entities_ok = false;
 
   rmw_context_t *rmw_context = rcl_context_get_rmw_context(&support.context);
   (void)rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
@@ -928,6 +1046,7 @@ static void destroy_entities() {
   RCSOFTCHECK(rcl_subscription_fini(&session_sub, &node));
   RCSOFTCHECK(rcl_subscription_fini(&heartbeat_sub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&imu_pub, &node));
+  RCSOFTCHECK(rcl_publisher_fini(&drive_diag_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&bump_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&stall_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&button_pub, &node));
@@ -965,13 +1084,16 @@ static void destroy_entities() {
   RCSOFTCHECK(rcl_node_fini(&node));
   rclc_support_fini(&support);
   entities_ok = false;
+  support_ok = false;
+  uros_unlock();
 }
 
 static void on_session_lost() {
   force_stop("agent lost");
-  destroy_entities();
   ros_state = RosState::kWaitAgent;
   ros_connected_at_ms = 0;
+  // Drop Connected before fini so imu_diag_task skips rcl_publish.
+  destroy_entities();
   Serial.println("micro-ROS agent lost — waiting to reconnect...");
 }
 
@@ -1045,10 +1167,14 @@ static void apply_drive(float yaw_rate, float dt) {
 #define HEADING_HOLD 1
 #endif
 #if HEADING_HOLD
-    trim = heading.correct(yaw_rate, dt, v, turn);
+    if (heading_lock()) {
+      trim = heading.correct(yaw_rate, dt, v, turn);
+      heading_unlock();
+    }
 #endif
-  } else {
+  } else if (heading_lock()) {
     heading.disarm();
+    heading_unlock();
   }
   static float trim_out = 0.0f;
   const float trim_step = 0.35f * ((dt > 0.0001f && dt < 0.05f) ? dt : 0.01f);
@@ -1141,7 +1267,10 @@ static void handle_ros_state() {
       entities_ok = true;
       ros_state = RosState::kConnected;
       ros_connected_at_ms = millis();
-      Serial.println("micro-ROS ready");
+      uros_ping_miss = 0;
+      uros_diag_up++;
+      Serial.printf("[diag %lu] UROS_UP #%lu micro-ROS ready mpu=%d\n",
+                    (unsigned long)millis(), (unsigned long)uros_diag_up, (int)mpu.ok());
 #if defined(ROVER_PERIPH)
       if (!periph_ready_played) {
         periph_ready_played = true;
@@ -1156,19 +1285,33 @@ static void handle_ros_state() {
       publish_drive_mode();
 #endif
     } else {
-      Serial.println("micro-ROS init failed — retrying...");
+      uros_diag_fail++;
+      Serial.printf("[diag %lu] UROS_CREATE_FAIL #%lu line=%d rc=%d — retrying\n",
+                    (unsigned long)millis(), (unsigned long)uros_diag_fail,
+                    uros_diag_fail_line, uros_diag_fail_rc);
       destroy_entities();
       ros_state = RosState::kWaitAgent;
     }
     break;
 
   case RosState::kConnected:
-    if (now - last_uros_ping_ms < 1000) {
+    if (now - last_uros_ping_ms < ROVER_UROS_PING_PERIOD_MS) {
       break;
     }
     last_uros_ping_ms = now;
-    if (RMW_RET_OK != rmw_uros_ping_agent(100, 1)) {
-      ros_state = RosState::kDisconnect;
+    if (RMW_RET_OK != rmw_uros_ping_agent(ROVER_UROS_PING_MS, 1)) {
+      uros_ping_miss++;
+      uros_diag_miss_total++;
+      if (uros_ping_miss >= ROVER_UROS_PING_MISS) {
+        uros_diag_lost++;
+        Serial.printf("[diag %lu] UROS_LOST #%lu after %u misses rssi=%d\n",
+                      (unsigned long)now, (unsigned long)uros_diag_lost,
+                      (unsigned)uros_ping_miss, WiFi.RSSI());
+        uros_ping_miss = 0;
+        ros_state = RosState::kDisconnect;
+      }
+    } else {
+      uros_ping_miss = 0;
     }
     break;
 
@@ -1264,6 +1407,343 @@ static bool imu_stationary() {
   return true;
 }
 
+#ifndef ROVER_DIAG_PERIOD_MS
+#define ROVER_DIAG_PERIOD_MS 100
+#endif
+
+// FreeRTOS IMU sample + /imu/data publish + DIAG tick. Main loop period was
+// 200–500 ms (display/ToF/spin), so millis() gates in loop() could never hit
+// the 20 Hz / 10 Hz targets. This task owns the rates; rcl ops take uros_mu.
+static void imu_diag_task(void *param) {
+  (void)param;
+  static uint32_t last_imu_pub = 0;
+  static uint32_t last_diag_ms = 0;
+  static uint32_t prev_sample_ms = 0;
+  static bool imu_frame_ready = false;
+  TickType_t wake = xTaskGetTickCount();
+
+  for (;;) {
+    const uint32_t now = millis();
+    constexpr uint32_t CMD_TIMEOUT_MS = 400;
+    const bool driving = (now - last_drive_ms) <= CMD_TIMEOUT_MS;
+    const uint32_t imu_period = driving ? 25 : 28;  // ~36 Hz idle target
+
+    float ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
+    const bool imu_ok = mpu.ok() && mpu.read(ax, ay, az, gx, gy, gz);
+    float yaw_rate = 0.0f;
+    if (imu_ok) {
+      yaw_rate = imu_yaw_rate(gx, gy, gz);
+      float dt = 0.05f;
+      if (prev_sample_ms != 0) {
+        dt = (now - prev_sample_ms) / 1000.0f;
+        if (dt < 0.001f) dt = 0.001f;
+        if (dt > 0.05f) dt = 0.05f;
+      }
+      prev_sample_ms = now;
+      if (heading_lock()) {
+        heading.update(yaw_rate, dt, imu_stationary());
+        last_imu_yaw_deg = heading.angle_deg_wrapped();
+        last_imu_gz_dps = heading.rate_dps();
+        const float rate_z = heading.rate_rad_s();
+        const bool ready = heading.ready();
+        const float bias = heading.bias_rad_s();
+        heading_unlock();
+        last_imu_ax = ax;
+        last_imu_ay = ay;
+        last_imu_az_g = az;
+        last_imu_gx = gx;
+        last_imu_gy = gy;
+        last_imu_gz = gz;
+        last_yaw_rate = yaw_rate;
+        last_imu_ok = true;
+        if (!imu_rest_logged && ready && imu_stationary()) {
+          imu_rest_logged = true;
+          rover_diag_event("mpu_rest ax=%.2f ay=%.2f az=%.2f bias=%.4f gz=%.2f", ax, ay, az,
+                           bias, last_imu_gz_dps);
+        }
+        (void)rate_z;
+      }
+    } else {
+      last_imu_ok = false;
+    }
+
+#ifdef ROVER_TDISPLAY_S3
+    const bool imu_clear = now >= button_priority_until;
+#else
+    const bool imu_clear = true;
+#endif
+
+    if (imu_ok && imu_clear && (now - last_imu_pub >= imu_period)) {
+      if (!imu_frame_ready) {
+        static char imu_frame_id[] = "imu_link";
+        imu_msg.header.frame_id.data = imu_frame_id;
+        imu_msg.header.frame_id.size = sizeof(imu_frame_id) - 1;
+        imu_msg.header.frame_id.capacity = sizeof(imu_frame_id);
+        for (int i = 0; i < 9; ++i) {
+          imu_msg.orientation_covariance[i] = 0.0;
+          imu_msg.angular_velocity_covariance[i] = 0.0;
+          imu_msg.linear_acceleration_covariance[i] = 0.0;
+        }
+        imu_msg.orientation_covariance[0] = 1.0e3;
+        imu_msg.orientation_covariance[4] = 1.0e3;
+        imu_msg.orientation_covariance[8] = 0.05;
+        imu_msg.angular_velocity_covariance[0] = 0.02;
+        imu_msg.angular_velocity_covariance[4] = 0.02;
+        imu_msg.angular_velocity_covariance[8] = 0.02;
+        imu_frame_ready = true;
+      }
+      imu_msg.header.stamp.sec = static_cast<int32_t>(now / 1000);
+      imu_msg.header.stamp.nanosec = static_cast<uint32_t>((now % 1000) * 1000000UL);
+      imu_msg.linear_acceleration.x = ax * 9.80665f;
+      imu_msg.linear_acceleration.y = ay * 9.80665f;
+      imu_msg.linear_acceleration.z = az * 9.80665f;
+      imu_msg.angular_velocity.x = gx;
+      imu_msg.angular_velocity.y = gy;
+      float rate_rad_s = 0.0f;
+      float yaw_for_quat = last_imu_yaw_deg;
+      if (heading_lock()) {
+        rate_rad_s = heading.rate_rad_s();
+        yaw_for_quat = heading.angle_deg_wrapped();
+        heading_unlock();
+      }
+      imu_msg.angular_velocity.z = rate_rad_s;
+      {
+        const float yaw_rad = yaw_for_quat * 0.017453292519943295f;
+        const float half = 0.5f * yaw_rad;
+        imu_msg.orientation.x = 0.0;
+        imu_msg.orientation.y = 0.0;
+        imu_msg.orientation.z = sinf(half);
+        imu_msg.orientation.w = cosf(half);
+      }
+
+      bool do_motion = false;
+      // Wait briefly for executor/tof publishers; 5 ms was dropping ~half the
+      // IMU slots under load (measured ~17 Hz vs 30 ms period target).
+      // Only advance last_imu_pub after a successful publish (or when unconnected).
+      if (uros_lock(pdMS_TO_TICKS(20))) {
+        if (ros_state == RosState::kConnected && entities_ok) {
+          rcl_ret_t imu_rc = rcl_publish(&imu_pub, &imu_msg, NULL);
+          (void)imu_rc;
+          last_imu_pub = now;
+          do_motion = true;
+        } else {
+          last_imu_pub = now;  // avoid spin while linking
+        }
+        uros_unlock();
+      }
+      if (do_motion) {
+        const float motor_l = fmaxf(fabsf(drv.tgt_left()), fabsf(drv.cur_left()));
+        const float motor_r = fmaxf(fabsf(drv.tgt_right()), fabsf(drv.cur_right()));
+#if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
+        // Wheel ticks come from direct GPIO ISRs; Rover has no MCP expander, so
+        // mcp_ir ticks were always 0 and stall detect fired on every cruise.
+        const uint32_t wl = mcp_ir.ok() ? mcp_ir.wheel_left_ticks() : direct_left_ticks;
+        const uint32_t wr = mcp_ir.ok() ? mcp_ir.wheel_right_ticks() : direct_right_ticks;
+#else
+        const uint32_t wl = 0;
+        const uint32_t wr = 0;
+#endif
+        motion.update(ax, ay, az, gx, gy, gz, motor_l, motor_r, wl, wr, now);
+        if (motion.bump()) {
+          imu_bump_pending = true;
+        }
+        if (motion.stall()) {
+          imu_stall_pending = true;
+        }
+        motion.clear_events();
+      }
+    }
+
+
+#if defined(ROVER_SONAR) || defined(ROVER_VL53L)
+    // Snapshot only — Serial/UDP DIAG emit runs in loop() (was blocking this task ~30ms+).
+    if (now - last_diag_ms >= ROVER_DIAG_PERIOD_MS && !imu_diag_line_pending) {
+      last_diag_ms = now;
+      RoverDiagSample diag{};
+      diag.now_ms = now;
+      diag.link_state = link_state_code();
+#ifdef ROVER_TDISPLAY_S3
+      diag.session = pi_session_sub_value;
+#else
+      diag.session = false;
+#endif
+#if defined(ROVER_SONAR)
+      diag.cal_active = rover_sonar.cal_sweep_active();
+      diag.cal_step = rover_sonar.cal_step();
+      diag.cal_snaps = rover_sonar.cal_snap_count();
+      diag.pan_deg = rover_sonar.pan_deg();
+      diag.range_m = rover_sonar.range_m();
+#else
+      diag.cal_active = false;
+      diag.pan_deg = 90.0f;
+      diag.range_m = -1.0f;
+#endif
+      diag.cmd_lin = last_lin;
+      diag.cmd_ang = last_ang;
+      diag.motor_l = drv.cur_left();
+      diag.motor_r = drv.cur_right();
+#ifdef ROVER_TDISPLAY_S3
+      diag.bat_v = battery.voltage();
+#else
+      diag.bat_v = 0.0f;
+#endif
+      diag.yaw_deg = last_imu_yaw_deg;
+      diag.gz_dps = last_imu_gz_dps;
+      diag.htrim = last_heading_trim;
+      diag.az_g = last_imu_az_g;
+#if defined(ROVER_VL53L)
+      diag.tof_l_m = side_tof.left_ok() ? side_tof.range_left_m() : -1.0f;
+      diag.tof_r_m = side_tof.right_ok() ? side_tof.range_right_m() : -1.0f;
+#endif
+      // pan_stk field: reuse to report imu_diag free stack words (was pan-only).
+      if (imu_diag_task_handle != nullptr) {
+        diag.pan_stack_words = uxTaskGetStackHighWaterMark(imu_diag_task_handle);
+      }
+      imu_diag_line_sample = diag;
+      imu_diag_line_pending = true;
+    }
+#endif
+
+    // Fixed 25 ms tick: idle publishes every 2nd tick (~20 Hz), driving every tick (~40 Hz).
+    // Keeps schedule tight when DIAG was deferred and when uros_mu briefly contends.
+    constexpr uint32_t IMU_TICK_MS = 25;
+    vTaskDelayUntil(&wake, pdMS_TO_TICKS(IMU_TICK_MS));
+  }
+}
+
+#ifndef ROVER_TOF_PUB_PERIOD_MS
+#define ROVER_TOF_PUB_PERIOD_MS 100
+#endif
+#ifndef ROVER_L8_PUB_PERIOD_MS
+// ~38 ms Wire hold per dump @400 kHz; at 200 ms that cost ~15 Hz IMU (measured).
+// 500 ms (~2 Hz) leaves enough bus for IMU ≥18 Hz while front ToF still usable.
+#define ROVER_L8_PUB_PERIOD_MS 1500
+#endif
+#ifndef ROVER_L8_POLL_PERIOD_MS
+#define ROVER_L8_POLL_PERIOD_MS 1500
+#endif
+
+// Poll + publish ToF on its own task (pre-rate-task this was loop-gated and
+// raced with imu_diag for uros_mu). I2C stays behind RoverI2cGuard in drivers.
+static void tof_pub_task(void *param) {
+  (void)param;
+  static uint32_t last_tof_pub = 0;
+  static uint32_t last_l8_pub = 0;
+  static uint32_t last_l8_poll = 0;
+  static uint8_t phase = 0;
+  for (;;) {
+    const uint32_t now0 = millis();
+    // Stagger side vs L8 so one task iteration never stacks both I2C bursts.
+#if defined(ROVER_VL53L)
+    if ((phase & 1u) == 0u && side_tof.ok()) {
+      side_tof.poll();
+    }
+#endif
+#if defined(ROVER_VL53L8)
+    if ((phase & 1u) == 1u && front_tof.ok() &&
+        (now0 - last_l8_poll >= ROVER_L8_POLL_PERIOD_MS)) {
+      last_l8_poll = now0;
+      front_tof.poll();
+    }
+#endif
+    phase++;
+
+    const uint32_t now = millis();
+    if (ros_state == RosState::kConnected && entities_ok) {
+#if defined(ROVER_VL53L)
+      if (side_tof.ok() && (now - last_tof_pub >= ROVER_TOF_PUB_PERIOD_MS)) {
+        const int32_t sec = static_cast<int32_t>(now / 1000);
+        const uint32_t nsec = static_cast<uint32_t>((now % 1000) * 1000000UL);
+        bool okL = side_tof.left_ok();
+        bool okR = side_tof.right_ok();
+        float mL = okL ? side_tof.range_left_m() : -1.0f;
+        float mR = okR ? side_tof.range_right_m() : -1.0f;
+#if defined(ROVER_SONAR)
+        rover_sonar.set_side_hint(okL ? mL : -1.0f, okR ? mR : -1.0f);
+#endif
+#if ROVER_VL53_SWAP_LR
+        const bool t_ok = okL;
+        okL = okR;
+        okR = t_ok;
+        const float t_m = mL;
+        mL = mR;
+        mR = t_m;
+#endif
+        if (uros_lock()) {
+          if (ros_state == RosState::kConnected && entities_ok) {
+            if (okL) {
+              tof_left_msg.range =
+                  (mL > 0.0f) ? mL : std::numeric_limits<float>::quiet_NaN();
+              tof_left_msg.header.stamp.sec = sec;
+              tof_left_msg.header.stamp.nanosec = nsec;
+              (void)rcl_publish(&tof_left_pub, &tof_left_msg, NULL);
+            }
+            if (okR) {
+              tof_right_msg.range =
+                  (mR > 0.0f) ? mR : std::numeric_limits<float>::quiet_NaN();
+              tof_right_msg.header.stamp.sec = sec;
+              tof_right_msg.header.stamp.nanosec = nsec;
+              (void)rcl_publish(&tof_right_pub, &tof_right_msg, NULL);
+            }
+            last_tof_pub = now;
+          }
+          uros_unlock();
+        }
+      }
+#endif
+#if defined(ROVER_VL53L8)
+      if (front_tof.ok() && (now - last_l8_pub >= ROVER_L8_PUB_PERIOD_MS)) {
+        const int32_t sec = static_cast<int32_t>(now / 1000);
+        const uint32_t nsec = static_cast<uint32_t>((now % 1000) * 1000000UL);
+        const float fc = front_tof.range_center_m();
+        const float fl = front_tof.range_left_m();
+        const float fr = front_tof.range_right_m();
+        for (uint8_t i = 0; i < 8; i++) {
+          const float c = front_tof.column_m(i);
+          tof_l8_cols_data[i] =
+              (c > 0.0f) ? c : std::numeric_limits<float>::quiet_NaN();
+        }
+        bool published = false;
+        if (uros_lock()) {
+          if (ros_state == RosState::kConnected && entities_ok) {
+            tof_front_msg.range =
+                (fc > 0.0f) ? fc : std::numeric_limits<float>::quiet_NaN();
+            tof_front_msg.header.stamp.sec = sec;
+            tof_front_msg.header.stamp.nanosec = nsec;
+            (void)rcl_publish(&tof_front_pub, &tof_front_msg, NULL);
+            tof_front_left_msg.range =
+                (fl > 0.0f) ? fl : std::numeric_limits<float>::quiet_NaN();
+            tof_front_left_msg.header.stamp.sec = sec;
+            tof_front_left_msg.header.stamp.nanosec = nsec;
+            (void)rcl_publish(&tof_front_left_pub, &tof_front_left_msg, NULL);
+            tof_front_right_msg.range =
+                (fr > 0.0f) ? fr : std::numeric_limits<float>::quiet_NaN();
+            tof_front_right_msg.header.stamp.sec = sec;
+            tof_front_right_msg.header.stamp.nanosec = nsec;
+            (void)rcl_publish(&tof_front_right_pub, &tof_front_right_msg, NULL);
+            (void)rcl_publish(&tof_l8_cols_pub, &tof_l8_cols_msg, NULL);
+            last_l8_pub = now;
+            published = true;
+          }
+          uros_unlock();
+        }
+#if defined(ROVER_PERIPH)
+        if (published) {
+          for (uint8_t i = 0; i < 8; i++) {
+            l8_cols_pending_data[i] = tof_l8_cols_data[i];
+          }
+          l8_cols_pending_ms = now;
+          l8_cols_pending = true;  // drain in loop() — keep tof stack thin
+        }
+#endif
+      }
+#endif
+    }
+    // 50 ms tick: alternate phases => side poll ~10 Hz, L8 poll ~5 Hz.
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
 void setup() {
   rover_board_power_on();
   SmoothDrive::gpio_safe_idle(DIR_L, PWM_L, DIR_R, PWM_R);
@@ -1273,6 +1753,18 @@ void setup() {
   Serial.setTxTimeoutMs(0);
 #endif
   delay(500);
+  if (uros_mu == nullptr) {
+    uros_mu = xSemaphoreCreateRecursiveMutex();
+  }
+  if (heading_mu == nullptr) {
+    heading_mu = xSemaphoreCreateRecursiveMutex();
+  }
+  // DIAG WiFiUDP must not race micro-ROS WiFiUDP (pbuf_free assert).
+  rover_diag_set_net_guard(
+      [](uint32_t timeout_ms) -> bool {
+        return uros_lock(pdMS_TO_TICKS(timeout_ms));
+      },
+      []() { uros_unlock(); });
   rover_diag_begin(reset_reason_str(esp_reset_reason()));
   Serial.printf("Reset reason: %s (%d)\n", reset_reason_str(esp_reset_reason()),
                 static_cast<int>(esp_reset_reason()));
@@ -1347,47 +1839,71 @@ void setup() {
     Serial.println("WARN: sonar init failed");
   }
 #endif
+#if defined(ROVER_MCP_IR)
+  // Keep L8 off the shared 0x29 while side L1X enumerate (L8 and L1X both default 0x29).
+  mcp_ir.set_vl53l8_lpn(false);
+  delay(30);
+#endif
 #if defined(ROVER_VL53L)
+  // Extra settle after MCP GPIO programming — telem shows ~half of boots L=-- R=--.
+  delay(80);
   if (!side_tof.begin(&mcp_ir)) {
-    Serial.println("WARN: VL53 init failed (check SDA/SCL, MCP GPA6/7 XSHUT, chip=L1X not L0X)");
+    Serial.println("WARN: VL53 init failed — retry once after XSHUT settle");
+    delay(250);
+    if (!side_tof.begin(&mcp_ir)) {
+      Serial.println("WARN: VL53 init failed — loop() will keep retrying for ~60s");
+    }
   }
 #endif
 #if defined(ROVER_MCP_IR)
-  // Side L1X now at 0x30/0x31 — wake front VL53L8CX on GPA3 (old aux IR).
-  mcp_ir.set_vl53l8_lpn(true);
-  delay(20);
-  {
-    const I2cScanResult l8scan = scanI2cBus();
-    bool saw_l8 = false;
-    for (uint8_t i = 0; i < l8scan.count; i++) {
-      if (l8scan.addrs[i] == 0x29) saw_l8 = true;
+  // Side L1X must own 0x30/0x31 before L8 joins at 0x29. If side enum failed, keep L8 off
+  // so a wedged 0x29 device cannot stall the shared MPU/MCP Wire bus.
+  const bool side_tof_ready =
+#if defined(ROVER_VL53L)
+      side_tof.ok();
+#else
+      true;
+#endif
+  if (side_tof_ready) {
+    mcp_ir.set_vl53l8_lpn(true);
+    delay(20);
+    {
+      const I2cScanResult l8scan = scanI2cBus();
+      bool saw_l8 = false;
+      for (uint8_t i = 0; i < l8scan.count; i++) {
+        if (l8scan.addrs[i] == 0x29) saw_l8 = true;
+      }
+      Serial.printf("VL53L8CX LPn=GPA3 %s (expect 0x29)\n", saw_l8 ? "OK" : "not on bus yet");
     }
-    Serial.printf("VL53L8CX LPn=GPA3 %s (expect 0x29)\n", saw_l8 ? "OK" : "not on bus yet");
+  } else {
+    mcp_ir.set_vl53l8_lpn(false);
+    Serial.println("VL53L8CX skipped — side VL53 not ready (avoid 0x29 bus fight)");
+    rover_diag_event("vl53l8 skip side_not_ready");
   }
 #endif
 #if defined(ROVER_VL53L8)
-  if (!front_tof.begin()) {
-    Serial.println("WARN: VL53L8CX ranging failed — check SPI_I2C_N=GND, LPn=GPA3, shroud on");
+  if (side_tof_ready) {
+    if (!front_tof.begin()) {
+      Serial.println("WARN: VL53L8CX ranging failed — retry once after LPn cycle");
+#if defined(ROVER_MCP_IR)
+      mcp_ir.set_vl53l8_lpn(false);
+      delay(80);
+      mcp_ir.set_vl53l8_lpn(true);
+      delay(80);
+#endif
+      if (!front_tof.begin()) {
+        Serial.println("WARN: VL53L8CX ranging failed — check SPI_I2C_N=GND, LPn=GPA3, shroud on");
+#if defined(ROVER_MCP_IR)
+        mcp_ir.set_vl53l8_lpn(false);
+#endif
+      }
+    }
   }
 #endif
 #if defined(ROVER_VL53L) || defined(ROVER_VL53L8)
-  xTaskCreatePinnedToCore(
-      [](void *) {
-        for (;;) {
-#if defined(ROVER_VL53L)
-          if (side_tof.ok()) {
-            side_tof.poll();
-          }
-#endif
-#if defined(ROVER_VL53L8)
-          if (front_tof.ok()) {
-            front_tof.poll();
-          }
-#endif
-          vTaskDelay(pdMS_TO_TICKS(100));
-        }
-      },
-      "tof", 6144, nullptr, 2, &tof_task_handle, 0);
+  // Core 1 with Arduino loop — keep WiFi core 0 free. Stack sized for rcl_publish.
+  xTaskCreatePinnedToCore(tof_pub_task, "tof", 16384, nullptr, 1, &tof_task_handle, 1);
+  Serial.println("tof task: poll+pub ~10 Hz core1 stack16k (HARD power cycle after OTA)");
 #endif
 #if defined(ROVER_SONAR)
   if (start_pan_task) {
@@ -1404,6 +1920,11 @@ void setup() {
 #endif
 #if defined(ROVER_PERIPH)
   rover_periph.begin(PIN_ROVER_SPEAKER, PIN_ROVER_RING);
+  pinMode(SONAR_TRIG_PIN, INPUT_PULLUP);
+  pinMode(SONAR_ECHO_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(SONAR_TRIG_PIN), direct_left_isr, RISING);
+  attachInterrupt(digitalPinToInterrupt(SONAR_ECHO_PIN), direct_right_isr, RISING);
+  Serial.printf("TEST ticks L GPIO %d R GPIO %d\n", SONAR_TRIG_PIN, SONAR_ECHO_PIN);
 #endif
 #endif
 
@@ -1458,6 +1979,12 @@ void setup() {
     Serial.println("MPU6050 not found — no heading hold / bump detect");
     status_led.set_state(LedState::kMpuError);
   }
+  // Was 6144 on core0@pri4: stack overflow + WiFi-core contention → silent reboot
+  // every 30–90s (BOOT_WIFI, no panic in telem). 16k on core1@pri3 with deferred
+  // bump/stall keeps rates without killing the box.
+  xTaskCreatePinnedToCore(imu_diag_task, "imu_diag", 16384, nullptr, 3,
+                          &imu_diag_task_handle, 1);
+  Serial.println("imu_diag task: IMU~20 Hz tick25 / DIAG deferred loop (HARD power cycle after OTA)");
 
 #if defined(ROVER_MICROROS_WIFI)
 #ifndef ROVER_AGENT_IP
@@ -1474,7 +2001,7 @@ void setup() {
   WiFi.setSleep(WIFI_PS_NONE);
   Serial.printf("WiFi -> server agent %s:%d  ESP IP=%s\n", ROVER_AGENT_IP, ROVER_AGENT_PORT,
                 WiFi.localIP().toString().c_str());
-  rover_diag_wifi_ready();
+  rover_diag_wifi_ready(reset_reason_str(esp_reset_reason()));
 #ifdef ROVER_TDISPLAY_S3
   ota.beginConnected("rover-esp");
 #endif
@@ -1533,21 +2060,20 @@ void loop() {
   poll_mcp_ir(now);
 #endif
 
-  float ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
-  const bool imu_ok = mpu.ok() && mpu.read(ax, ay, az, gx, gy, gz);
-  const float yaw_rate = imu_ok ? imu_yaw_rate(gx, gy, gz) : 0.0f;
-  if (imu_ok) {
-    heading.update(yaw_rate, dt, imu_stationary());
-    last_imu_yaw_deg = heading.angle_deg_wrapped();
-    last_imu_gz_dps = heading.rate_dps();
-    last_imu_az_g = az;
-    if (!imu_rest_logged && heading.ready() && imu_stationary()) {
-      imu_rest_logged = true;
-      rover_diag_event("mpu_rest ax=%.2f ay=%.2f az=%.2f bias=%.4f gz=%.2f", ax, ay, az,
-                       heading.bias_rad_s(), heading.rate_dps());
-    }
-  }
-  const float yaw_deg = imu_ok ? heading.angle_deg_wrapped() : 0.0f;
+  // IMU sample/heading/publish owned by imu_diag_task (rate-accurate).
+  const bool imu_ok = last_imu_ok;
+  (void)imu_ok;
+  const float ax = last_imu_ax;
+  const float ay = last_imu_ay;
+  const float az = last_imu_az_g;
+  const float gx = last_imu_gx;
+  const float gy = last_imu_gy;
+  const float gz = last_imu_gz;
+  const float yaw_rate = last_yaw_rate;
+  const float yaw_deg = last_imu_yaw_deg;
+  (void)gx;
+  (void)gy;
+  (void)gz;
 
   if (ros_state == RosState::kConnected) {
 #if defined(ROVER_SONAR)
@@ -1571,7 +2097,7 @@ void loop() {
 
 #ifdef ROVER_TDISPLAY_S3
     if (now < button_priority_until) {
-      for (int i = 0; i < 12; i++) {
+      for (int i = 0; i < 4; i++) {
         spin_ros_input();
       }
     } else {
@@ -1582,6 +2108,26 @@ void loop() {
 #endif
 
     apply_drive(yaw_rate, dt);
+
+    if (imu_bump_pending) {
+      imu_bump_pending = false;
+      publish_bump_event("IMU jerk");
+    }
+    if (imu_stall_pending) {
+      imu_stall_pending = false;
+      stall_msg.data = true;
+      RCSOFTCHECK(rcl_publish(&stall_pub, &stall_msg, NULL));
+      status_led.trigger(LedEvent::kStall);
+      Serial.println("EVENT stall — motors cut locally");
+      force_stop("stall");
+#ifdef ROVER_TDISPLAY_S3
+      ui.stall = true;
+      stall_block_until = millis() + 2500;
+#if defined(ROVER_PERIPH)
+      rover_periph.notify_stall();
+#endif
+#endif
+    }
 
 #if defined(ROVER_SONAR)
     static uint32_t last_sonar_pub = 0;
@@ -1613,123 +2159,19 @@ void loop() {
     }
 #endif
 
-#if defined(ROVER_VL53L)
-    static uint32_t last_tof_pub = 0;
-    if (side_tof.ok() && now - last_tof_pub >= 100) {
-      last_tof_pub = now;
-      const int32_t sec = static_cast<int32_t>(now / 1000);
-      const uint32_t nsec = static_cast<uint32_t>((now % 1000) * 1000000UL);
-      bool okL = side_tof.left_ok();
-      bool okR = side_tof.right_ok();
-      float mL = okL ? side_tof.range_left_m() : -1.0f;
-      float mR = okR ? side_tof.range_right_m() : -1.0f;
-#if defined(ROVER_SONAR)
-      rover_sonar.set_side_hint(okL ? mL : -1.0f, okR ? mR : -1.0f);
+#if defined(ROVER_VL53L) || defined(ROVER_VL53L8)
+    // ToF poll+/rover/tof/* publish owned by tof_pub_task.
 #endif
-#if ROVER_VL53_SWAP_LR
-      const bool t_ok = okL;
-      okL = okR;
-      okR = t_ok;
-      const float t_m = mL;
-      mL = mR;
-      mR = t_m;
-#endif
-      if (okL) {
-        const float rng = mL;
-        tof_left_msg.range = (rng > 0.0f) ? rng : std::numeric_limits<float>::quiet_NaN();
-        tof_left_msg.header.stamp.sec = sec;
-        tof_left_msg.header.stamp.nanosec = nsec;
-        RCSOFTCHECK(rcl_publish(&tof_left_pub, &tof_left_msg, NULL));
-      }
-      if (okR) {
-        const float rng = mR;
-        tof_right_msg.range = (rng > 0.0f) ? rng : std::numeric_limits<float>::quiet_NaN();
-        tof_right_msg.header.stamp.sec = sec;
-        tof_right_msg.header.stamp.nanosec = nsec;
-        RCSOFTCHECK(rcl_publish(&tof_right_pub, &tof_right_msg, NULL));
-      }
-    }
-#endif
-#if defined(ROVER_VL53L8)
-    static uint32_t last_l8_pub = 0;
-    if (front_tof.ok() && now - last_l8_pub >= 100) {
-      last_l8_pub = now;
-      const int32_t sec = static_cast<int32_t>(now / 1000);
-      const uint32_t nsec = static_cast<uint32_t>((now % 1000) * 1000000UL);
-      const float fc = front_tof.range_center_m();
-      const float fl = front_tof.range_left_m();
-      const float fr = front_tof.range_right_m();
-      tof_front_msg.range = (fc > 0.0f) ? fc : std::numeric_limits<float>::quiet_NaN();
-      tof_front_msg.header.stamp.sec = sec;
-      tof_front_msg.header.stamp.nanosec = nsec;
-      RCSOFTCHECK(rcl_publish(&tof_front_pub, &tof_front_msg, NULL));
-      tof_front_left_msg.range = (fl > 0.0f) ? fl : std::numeric_limits<float>::quiet_NaN();
-      tof_front_left_msg.header.stamp.sec = sec;
-      tof_front_left_msg.header.stamp.nanosec = nsec;
-      RCSOFTCHECK(rcl_publish(&tof_front_left_pub, &tof_front_left_msg, NULL));
-      tof_front_right_msg.range = (fr > 0.0f) ? fr : std::numeric_limits<float>::quiet_NaN();
-      tof_front_right_msg.header.stamp.sec = sec;
-      tof_front_right_msg.header.stamp.nanosec = nsec;
-      RCSOFTCHECK(rcl_publish(&tof_front_right_pub, &tof_front_right_msg, NULL));
-      for (uint8_t i = 0; i < 8; i++) {
-        const float c = front_tof.column_m(i);
-        tof_l8_cols_data[i] = (c > 0.0f) ? c : std::numeric_limits<float>::quiet_NaN();
-      }
-      RCSOFTCHECK(rcl_publish(&tof_l8_cols_pub, &tof_l8_cols_msg, NULL));
-#if defined(ROVER_PERIPH)
-      rover_periph.note_l8_cols(now, tof_l8_cols_data, 8);
-#endif
-    }
-#endif
-#ifdef ROVER_TDISPLAY_S3
-    const bool rover_active =
-        pi_session_sub_value || (millis() - last_drive_ms < 1000);
-#else
-    const bool rover_active = true;
-#endif
+    // IMU publish + motion bump/stall handled in imu_diag_task.
 
-    static uint32_t last_imu_pub = 0;
-    constexpr uint32_t CMD_TIMEOUT_MS = 400;
-    const bool driving = (millis() - last_drive_ms) <= CMD_TIMEOUT_MS;
-    const uint32_t imu_period = driving ? 25 : 250;
-#ifdef ROVER_TDISPLAY_S3
-    const bool imu_clear = now >= button_priority_until;
-#else
-    const bool imu_clear = true;
-#endif
-
-    if (imu_ok && rover_active && imu_clear && (now - last_imu_pub >= imu_period)) {
-      last_imu_pub = now;
-      imu_msg.linear_acceleration.x = ax * 9.80665f;
-      imu_msg.linear_acceleration.y = ay * 9.80665f;
-      imu_msg.linear_acceleration.z = az * 9.80665f;
-      imu_msg.angular_velocity.x = gx;
-      imu_msg.angular_velocity.y = gy;
-      imu_msg.angular_velocity.z = heading.rate_rad_s();
-      RCSOFTCHECK(rcl_publish(&imu_pub, &imu_msg, NULL));
-
-      const float motor_l = fmaxf(fabsf(drv.tgt_left()), fabsf(drv.cur_left()));
-      const float motor_r = fmaxf(fabsf(drv.tgt_right()), fabsf(drv.cur_right()));
-      motion.update(ax, ay, az, gx, gy, gz, motor_l, motor_r,
-                    mcp_ir.wheel_left_ticks(), mcp_ir.wheel_right_ticks(), now);
-      if (motion.bump()) {
-        publish_bump_event("IMU jerk");
-      }
-      if (motion.stall()) {
-        stall_msg.data = true;
-        RCSOFTCHECK(rcl_publish(&stall_pub, &stall_msg, NULL));
-        status_led.trigger(LedEvent::kStall);
-        Serial.println("EVENT stall — motors cut locally");
-        force_stop("stall");
-#ifdef ROVER_TDISPLAY_S3
-        ui.stall = true;
-        stall_block_until = now + 2500;
-#if defined(ROVER_PERIPH)
-        rover_periph.notify_stall();
-#endif
-#endif
-      }
-      motion.clear_events();
+    // Low-rate false heartbeat so bump/stall stay alive without events.
+    static uint32_t last_bump_stall_hb = 0;
+    if (ros_state == RosState::kConnected && (now - last_bump_stall_hb >= 1000)) {
+      last_bump_stall_hb = now;
+      bump_msg.data = false;
+      RCSOFTCHECK(rcl_publish(&bump_pub, &bump_msg, NULL));
+      stall_msg.data = false;
+      RCSOFTCHECK(rcl_publish(&stall_pub, &stall_msg, NULL));
     }
 
     static uint32_t last_bat_pub = 0;
@@ -1737,6 +2179,66 @@ void loop() {
       last_bat_pub = now;
       battery_msg.data = battery.voltage();
       RCSOFTCHECK(rcl_publish(&battery_pub, &battery_msg, NULL));
+    }
+  }
+
+  // IMU retry: boot-only detect left IMU dead forever after a slow power-up.
+  if (!mpu.ok()) {
+    static uint32_t last_imu_retry = 0;
+    if (now - last_imu_retry >= 3000) {
+      last_imu_retry = now;
+      imu_retry_count++;
+      if (mpu.begin(MPU_SDA, MPU_SCL)) {
+        Serial.printf("[diag %lu] MPU6050 OK on retry #%lu\n", (unsigned long)now,
+                      (unsigned long)imu_retry_count);
+        calibrate_gyro();
+      }
+    }
+  }
+  {
+    static uint32_t last_diag_pub = 0;
+    if (ros_state == RosState::kConnected && entities_ok && (now - last_diag_pub >= 1000)) {
+      last_diag_pub = now;
+      char scan[64] = "";
+#if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
+      {
+        size_t o = 0;
+        for (uint8_t i = 0; i < ir_i2c_scan.count && o + 6 < sizeof(scan); i++) {
+          o += snprintf(scan + o, sizeof(scan) - o, "%s%02x", i ? "," : "", ir_i2c_scan.addrs[i]);
+        }
+      }
+      const int mcp_ok = (int)mcp_ir.ok();
+#else
+      const int mcp_ok = -1;
+#endif
+      const char* imu_gate = !mpu.ok() ? "mpu_not_ok" : "none";
+      const char* tick_gate = "none";
+      int n = snprintf(drive_diag_buf, sizeof(drive_diag_buf),
+               "t=%lu mpu=%d imu_retry=%lu imu_gate=%s i2c43_44=[%s] mcp=%d "
+               "ent=%d sup=%d up=%lu lost=%lu fail=%lu@%d rc=%d miss=%lu rssi=%d "
+               "ticksL=%lu ticksR=%lu tick_pubs=%lu tick_gate=%s bat=%.2f heap=%u",
+               (unsigned long)now, (int)mpu.ok(), (unsigned long)imu_retry_count, imu_gate,
+               scan, mcp_ok, (int)entities_ok, (int)support_ok,
+               (unsigned long)uros_diag_up, (unsigned long)uros_diag_lost,
+               (unsigned long)uros_diag_fail, uros_diag_fail_line, uros_diag_fail_rc,
+               (unsigned long)uros_diag_miss_total, WiFi.RSSI(),
+               (unsigned long)direct_left_ticks, (unsigned long)direct_right_ticks,
+               (unsigned long)tick_pub_count, tick_gate,
+#ifdef ROVER_TDISPLAY_S3
+               battery.voltage(),
+#else
+               0.0f,
+#endif
+               (unsigned)ESP.getFreeHeap());
+      if (n < 0) n = 0;
+      if (n >= (int)sizeof(drive_diag_buf)) n = sizeof(drive_diag_buf) - 1;
+      drive_diag_msg.data.data = drive_diag_buf;
+      drive_diag_msg.data.size = (size_t)n;
+      drive_diag_msg.data.capacity = sizeof(drive_diag_buf);
+      if (uros_lock()) {
+        RCSOFTCHECK(rcl_publish(&drive_diag_pub, &drive_diag_msg, NULL));
+        uros_unlock();
+      }
     }
   }
 
@@ -1753,6 +2255,11 @@ void loop() {
     if (estop.active()) Serial.print(" ESTOP");
     Serial.printf(" pi=%lus", last_pi_traffic_ms ? (unsigned long)((now - last_pi_traffic_ms) / 1000) : 999UL);
 #endif
+    Serial.printf(" mpu=%d ent=%d sup=%d up=%lu lost=%lu fail=%lu@%d miss=%lu rssi=%d",
+                  (int)mpu.ok(), (int)entities_ok, (int)support_ok,
+                  (unsigned long)uros_diag_up, (unsigned long)uros_diag_lost,
+                  (unsigned long)uros_diag_fail, uros_diag_fail_line,
+                  (unsigned long)uros_diag_miss_total, WiFi.RSSI());
     Serial.println();
   }
 
@@ -1797,6 +2304,23 @@ void loop() {
     rover_periph.tick_sonar_map(now, rover_sonar.pan_deg(), rover_sonar.range_m(),
                                 rover_sonar.cal_sweep_active());
   }
+#else
+  // Sonar is off (GPIO 11/12 are wheel ticks). Still paint L8 + side ToF.
+#if defined(ROVER_VL53L)
+  if (side_tof.ok()) {
+    bool okL = side_tof.left_ok();
+    bool okR = side_tof.right_ok();
+    float l = okL ? side_tof.range_left_m() : -1.0f;
+    float r = okR ? side_tof.range_right_m() : -1.0f;
+#if ROVER_VL53_SWAP_LR
+    const float t_m = l;
+    l = r;
+    r = t_m;
+#endif
+    rover_periph.note_side_tof(now, l, r);
+  }
+#endif
+  rover_periph.tick_distance_ring(now);
 #endif
 #endif
 
@@ -1910,37 +2434,75 @@ void loop() {
   }
   display.draw(ui, now);
 
-#if defined(ROVER_SONAR) || defined(ROVER_VL53L)
-  {
-    RoverDiagSample diag{};
-    diag.now_ms = now;
-    diag.link_state = link_state_code();
-    diag.session = pi_session_sub_value;
-#if defined(ROVER_SONAR)
-    diag.cal_active = rover_sonar.cal_sweep_active();
-    diag.cal_step = rover_sonar.cal_step();
-    diag.cal_snaps = rover_sonar.cal_snap_count();
-    diag.pan_deg = rover_sonar.pan_deg();
-    diag.range_m = rover_sonar.range_m();
-#else
-    diag.cal_active = false;
-    diag.pan_deg = 90.0f;
-    diag.range_m = -1.0f;
+// ToF re-init deferred-retry removed: soft-reboot leave chips wedged (i2c29=1 but
+  // init fails); worker contended I2C with imu_diag. Hard power cycle required.
+  // Setup still parks L8 before side enum + one-at-a-time XSHUT.
+
+#if defined(ROVER_PERIPH) && defined(ROVER_VL53L8)
+  if (l8_cols_pending) {
+    l8_cols_pending = false;
+    rover_periph.note_l8_cols(l8_cols_pending_ms, l8_cols_pending_data, 8);
+  }
 #endif
-    diag.cmd_lin = last_lin;
-    diag.cmd_ang = last_ang;
-    diag.motor_l = drv.cur_left();
-    diag.motor_r = drv.cur_right();
-    diag.bat_v = battery.voltage();
-    diag.yaw_deg = last_imu_yaw_deg;
-    diag.gz_dps = last_imu_gz_dps;
-    diag.htrim = last_heading_trim;
-    diag.az_g = last_imu_az_g;
+  // DIAG snapshot from imu_diag_task; emit here so Serial/UDP cannot stall IMU rate.
+  if (imu_diag_line_pending) {
+    imu_diag_line_pending = false;
+#if defined(ROVER_VL53L) || defined(ROVER_VL53L8)
+    // Fold tof-task free stack into pan_stk field (min) so telem shows both.
+    if (tof_task_handle != nullptr) {
+      const uint32_t tof_hwm = uxTaskGetStackHighWaterMark(tof_task_handle);
+      if (tof_hwm < imu_diag_line_sample.pan_stack_words ||
+          imu_diag_line_sample.pan_stack_words == 0) {
+        imu_diag_line_sample.pan_stack_words = tof_hwm;
+      }
+    }
+#endif
+    rover_diag_tick(imu_diag_line_sample);
+  }
+  // One-shot soft-reboot ToF recovery: park L8, retry side begin a few times.
+  // Does not run if already OK. Worker task so loop/DIAG stay responsive.
 #if defined(ROVER_VL53L)
-    diag.tof_l_m = side_tof.left_ok() ? side_tof.range_left_m() : -1.0f;
-    diag.tof_r_m = side_tof.right_ok() ? side_tof.range_right_m() : -1.0f;
+  {
+    static uint8_t soft_tries = 0;
+    static uint32_t soft_last_ms = 0;
+    if (!side_tof.ok() && !tof_soft_reinit_busy && soft_tries < 5 && now > 10000 &&
+        (now - soft_last_ms >= 10000)) {
+      soft_last_ms = now;
+      soft_tries++;
+      tof_soft_reinit_busy = true;
+      const uint8_t n = soft_tries;
+      xTaskCreatePinnedToCore(
+          [](void *param) {
+            const uint8_t try_n = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(param));
+#if defined(ROVER_MCP_IR)
+            mcp_ir.set_vl53l8_lpn(false);
+            vTaskDelay(pdMS_TO_TICKS(50));
 #endif
-    rover_diag_tick(diag);
+            if (side_tof.begin(&mcp_ir)) {
+              rover_diag_event("vl53_soft_reinit OK try=%u L=%s R=%s", try_n,
+                               side_tof.left_ok() ? "OK" : "--",
+                               side_tof.right_ok() ? "OK" : "--");
+#if defined(ROVER_VL53L8) && defined(ROVER_MCP_IR)
+              if (side_tof.ok()) {
+                mcp_ir.set_vl53l8_lpn(true);
+                vTaskDelay(pdMS_TO_TICKS(80));
+                if (!front_tof.begin()) {
+                  mcp_ir.set_vl53l8_lpn(false);
+                  rover_diag_event("vl53l8_soft_reinit fail try=%u", try_n);
+                } else {
+                  rover_diag_event("vl53l8_soft_reinit OK try=%u", try_n);
+                }
+              }
+#endif
+            } else {
+              rover_diag_event("vl53_soft_reinit fail try=%u", try_n);
+            }
+            tof_soft_reinit_busy = false;
+            vTaskDelete(nullptr);
+          },
+          "tof_soft", 8192, reinterpret_cast<void *>(static_cast<uintptr_t>(n)), 1, nullptr,
+          1);
+    }
   }
 #endif
 

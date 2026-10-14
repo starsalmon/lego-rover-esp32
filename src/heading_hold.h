@@ -70,7 +70,8 @@ class HeadingHold {
   static constexpr float ADJ_MAP_DEG = HEADING_ADJ_MAP_DEG;
   static constexpr float ADJ_OUT_NORM = HEADING_ADJ_OUT_NORM;
   static constexpr float TRIM_MAX = HEADING_TRIM_MAX;
-  static constexpr float ANG_ON = 0.04f;
-  static constexpr float ANG_OFF = 0.025f;
+  // Match apply_drive's straight deadband so a ROS steer is not replaced by trim.
+  static constexpr float ANG_ON = 0.02f;
+  static constexpr float ANG_OFF = 0.015f;
   static constexpr float LIN_THRESH = 0.05f;
 };

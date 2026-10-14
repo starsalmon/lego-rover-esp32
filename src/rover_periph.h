@@ -28,6 +28,7 @@ class RoverPeriph {
   void sonar_frame(const uint8_t* dist_cm, uint8_t count, uint8_t sweep_led);
 
   void tick_sonar_map(uint32_t now_ms, float pan_deg, float range_m, bool scanning);
+  void tick_distance_ring(uint32_t now_ms);
   void tick_ir_map(uint32_t now_ms, bool front_l, bool front_r);
   void note_ir_rear_sample(uint32_t now_ms, float pan_deg, bool hit);
   void note_side_tof(uint32_t now_ms, float left_m, float right_m);

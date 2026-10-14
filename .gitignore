@@ -9,3 +9,5 @@ platformio_private.ini
 compile_commands.json
 *.d
 .DS_Store
+*.bak.*
+captures/

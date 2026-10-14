@@ -23,6 +23,9 @@ bool Mpu6050::begin(int sda, int scl) {
   delay(20);
   if (!_write(0x1B, 0x08)) return false;  // ±500 °/s
   if (!_write(0x1C, 0x10)) return false;  // ±8g
+  // DLPF on (reset is 256 Hz / 8 kHz, so motor vibration aliases into yaw).
+  // 0x03 ≈ 44 Hz gyro bandwidth. Sample rate stays 1 kHz.
+  if (!_write(0x1A, 0x03)) return false;
   rover_i2c_touch();
   _ok = true;
   return true;
@@ -49,7 +52,8 @@ bool Mpu6050::read(float &ax, float &ay, float &az, float &gx, float &gy, float 
 }
 
 bool Mpu6050::_write(uint8_t reg, uint8_t val) {
-  RoverI2cGuard guard;
+  RoverI2cGuard guard(pdMS_TO_TICKS(8));
+  if (!guard) return false;
   rover_i2c_touch();
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(reg);
@@ -58,7 +62,8 @@ bool Mpu6050::_write(uint8_t reg, uint8_t val) {
 }
 
 bool Mpu6050::_read(uint8_t reg, uint8_t *buf, size_t len) {
-  RoverI2cGuard guard;
+  RoverI2cGuard guard(pdMS_TO_TICKS(8));
+  if (!guard) return false;
   rover_i2c_touch();
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(reg);
