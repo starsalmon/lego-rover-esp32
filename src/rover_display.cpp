@@ -376,8 +376,7 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
   g.printf("BAT %.1fV%s", data.bat_v, data.bat_critical ? "!" : (data.bat_low ? "?" : ""));
   y += kLineH2;
 
-#if defined(ROVER_VL53L)
-  {
+  if (data.tof_enabled) {
     const bool any_ok = data.tof_left_ok || data.tof_right_ok;
     g.setTextColor(any_ok ? TFT_GREEN : TFT_RED, TFT_BLACK);
     g.setCursor(kTextX, y);
@@ -387,7 +386,6 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
     print_range_value(g, data.tof_right_ok ? data.tof_right_m : -1.0f);
     y += kLineH2;
   }
-#endif
 #if defined(ROVER_VL53L8)
   {
     g.setTextColor(data.tof_front_ok ? TFT_GREEN : TFT_RED, TFT_BLACK);
@@ -458,9 +456,14 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
       }
       g.setTextColor(rng_col, TFT_BLACK);
       g.setCursor(kTextX, y);
-      g.print("Pan ");
-      g.printf("%3.0f  ", data.sonar_pan_deg);
+      g.print("Son ");
       print_range_value(g, data.sonar_range_m);
+      g.setTextColor(TFT_WHITE, TFT_BLACK);
+      if (data.sonar_pan_deg >= 0.0f) {
+        g.printf(" S%3.0f", data.sonar_pan_deg);
+      } else {
+        g.print(" S --");
+      }
       y += kLineH2;
     }
   }
@@ -472,26 +475,6 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
     y += kLineH2;
   }
 
-  if (data.ir_enabled) {
-    g.setTextSize(1);
-    if (!data.ir_ok) {
-      g.setTextColor(TFT_RED, TFT_BLACK);
-      g.setCursor(kTextX, y);
-      g.printf("MCP body --");
-      y += 12;
-    } else {
-      g.setTextColor(TFT_DARKGREY, TFT_BLACK);
-      g.setCursor(kTextX, y);
-      g.printf("WL%c WR%c", (data.ir_inputs & 0x01) ? '1' : '0',
-               (data.ir_inputs & 0x02) ? '1' : '0');
-      if (data.ir_wheels_on) {
-        g.setTextColor(TFT_CYAN, TFT_BLACK);
-        g.print(" Whl");
-      }
-      y += 12;
-    }
-    g.setTextSize(2);
-  }
 }
 
 static void draw_estop_hint(TFT_eSprite &g) {

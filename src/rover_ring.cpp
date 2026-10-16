@@ -232,10 +232,14 @@ void RoverRing::render(uint32_t now_ms) {
           continue;
         }
         // Shared distance colormap (sonar / ToF / IR overlays all use cm bins).
-        // Near = warm orange, far = cool blue. Constant brightness (no distance dimming).
+        // 5-stop gradient over 0-120 cm: red (nearest) → orange → yellow → green → blue (far).
+        // Constant brightness (no distance dimming).
         const float tt = constrain(d / 120.0f, 0.0f, 1.0f);
-        const float h = 0.07f + 0.58f * tt;  // ~orange → ~blue
-        const float v = 0.65f;
+        static const float kStops[5] = {0.0f, 0.083f, 0.167f, 0.333f, 0.65f};
+        const float pos = tt * 4.0f;
+        const int seg = pos >= 4.0f ? 3 : static_cast<int>(pos);
+        const float h = kStops[seg] + (kStops[seg + 1] - kStops[seg]) * (pos - seg);
+        const float v = 0.65f * (_sonar_gain[i] ? _sonar_gain[i] / 255.0f : 1.0f);
         uint8_t r = 0;
         uint8_t g = 0;
         uint8_t b = 0;

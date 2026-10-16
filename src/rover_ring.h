@@ -14,6 +14,8 @@ class RoverRing {
   void set_mode(uint8_t mode_id);
   void flash(uint8_t flash_id, uint32_t duration_ms = 700);
   void sonar_frame(const uint8_t* dist_cm, uint8_t count, uint8_t sweep_led);
+  /** Per-LED brightness for distance pixels (255 = full). Used for fades. */
+  void set_sonar_gain(uint8_t i, uint8_t gain) { if (i < ROVER_RING_COUNT) _sonar_gain[i] = gain; }
 
   static constexpr uint8_t kModeStandby = 0;
   static constexpr uint8_t kModeReady = 1;
@@ -40,4 +42,5 @@ class RoverRing {
   float _phase = 0.0f;
   uint8_t _sonar_bins[ROVER_RING_COUNT];
   uint8_t _sonar_sweep = 0;
+  uint8_t _sonar_gain[ROVER_RING_COUNT] = {};  // 0 = default full; else brightness/255
 };

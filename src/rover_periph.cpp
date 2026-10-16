@@ -173,6 +173,44 @@ void RoverPeriph::note_l8_cols(uint32_t now_ms, const float* cols, uint8_t n) {
   }
 }
 
+// Rear sonar on the pan servo. Assumption: servo 90° (logical centre) points
+// straight back (ring 180°); higher servo angles swing the sonar toward the
+// robot's left, so ring bearing = 270 - servo_deg (0=fwd, 90=left, 180=rear).
+// Readings go to the nearest rear LED (135/180/225; cut-offs at 157.5/202.5);
+// bearings outside 112.5-247.5 aren't painted (they'd be the side LEDs).
+// Servo inactive/unknown → 180° LED only.
+// Each painted LED holds 0.5 s, then fades out over 1 s.
+void RoverPeriph::note_rear_sonar(uint32_t now_ms, float m, float servo_deg) {
+  if (m <= 0.02f) return;  // no reading: let the LED fade out
+  int idx = 1;
+  if (servo_deg >= 0.0f) {
+    const float bearing = 270.0f - servo_deg;
+    if (bearing < 112.5f || bearing > 247.5f) return;
+    idx = bearing < 157.5f ? 0 : (bearing <= 202.5f ? 1 : 2);
+  }
+  _rear_bin[idx] = sonar_m_to_cm(m);
+  _rear_ms[idx] = now_ms ? now_ms : 1;
+}
+
+void RoverPeriph::paint_rear(uint32_t now_ms, uint8_t* frame) {
+  const float bearings[3] = {135.0f, 180.0f, 225.0f};
+  for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) _ring.set_sonar_gain(i, 0);
+  for (uint8_t b = 0; b < 3; b++) {
+    const int led = bearing_to_led(bearings[b]);
+    if (led < 0 || led >= ROVER_RING_COUNT) continue;
+    const uint32_t age = _rear_ms[b] ? now_ms - _rear_ms[b] : 0xFFFFFFFFu;
+    if (age >= 1500 || _rear_bin[b] >= 255) {
+      frame[led] = 255;
+      continue;
+    }
+    frame[led] = _rear_bin[b];
+    if (age > 500) {
+      const uint32_t g = 255u - ((age - 500u) * 254u) / 1000u;
+      _ring.set_sonar_gain(static_cast<uint8_t>(led), static_cast<uint8_t>(g));
+    }
+  }
+}
+
 void RoverPeriph::tick_distance_ring(uint32_t now_ms) {
   static uint32_t last_ms = 0;
   if (now_ms - last_ms < 50) {
@@ -213,6 +251,7 @@ void RoverPeriph::tick_distance_ring(uint32_t now_ms) {
       }
     }
   }
+  paint_rear(now_ms, frame);
   sonar_frame(frame, ROVER_RING_COUNT, ROVER_RING_COUNT);
 }
 
@@ -366,6 +405,7 @@ void RoverPeriph::tick_sonar_map(uint32_t now_ms, float pan_deg, float range_m, 
     }
   }
 
+  paint_rear(now_ms, frame);
   sonar_frame(frame, ROVER_RING_COUNT, static_cast<uint8_t>(sweep));
 }
 

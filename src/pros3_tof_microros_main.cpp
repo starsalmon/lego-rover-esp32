@@ -41,6 +41,9 @@
 #include <std_msgs/msg/float32_multi_array.h>
 #include <std_msgs/msg/float32.h>
 #include <std_msgs/msg/bool.h>
+#include <std_msgs/msg/int32.h>
+#include <driver/rmt.h>
+#include "fleet_ir_proto.h"
 
 #include <VL53L0X.h>
 #include <VL53L1X.h>
@@ -105,6 +108,43 @@ bool g_sonar_ok = false;
 float g_sonar_m = -1.0f;
 
 IrTx g_ir_tx;
+#ifndef ROVER_IR_BEACON_ON
+#define ROVER_IR_BEACON_ON 1
+#endif
+// IR RX (TSOP on IR_RX_PIN, active-low): falling edges counted in an ISR.
+volatile uint32_t g_ir_rx_edges = 0;
+void IRAM_ATTR on_ir_rx_edge() { g_ir_rx_edges++; }
+// IR TX: RMT channel 3 with hardware 38 kHz carrier. One fleet frame
+// (sync + (id+1) bursts) every FLEET_IR_FRAME_US from a small task.
+volatile uint32_t g_ir_tx_frames = 0;
+bool g_ir_rmt_ok = false;
+constexpr rmt_channel_t kIrRmtCh = RMT_CHANNEL_3;
+rmt_item32_t g_ir_items[1 + FLEET_IR_MAX_ID + 2];
+size_t g_ir_nitems = 0;
+void ir_rmt_task(void*) {
+  for (;;) {
+    if (rmt_write_items(kIrRmtCh, g_ir_items, g_ir_nitems, true) == ESP_OK) g_ir_tx_frames++;
+    vTaskDelay(pdMS_TO_TICKS(FLEET_IR_FRAME_US / 1000));
+  }
+}
+bool begin_ir_rmt() {
+  rmt_config_t c = RMT_DEFAULT_CONFIG_TX(static_cast<gpio_num_t>(IR_TX_PIN), kIrRmtCh);
+  c.clk_div = 80;  // 1 us ticks
+  c.tx_config.carrier_en = true;
+  c.tx_config.carrier_freq_hz = IR_TX_HZ;
+  c.tx_config.carrier_duty_percent = 33;
+  c.tx_config.carrier_level = RMT_CARRIER_LEVEL_HIGH;
+  c.tx_config.idle_output_en = true;
+  c.tx_config.idle_level = RMT_IDLE_LEVEL_LOW;
+  if (rmt_config(&c) != ESP_OK || rmt_driver_install(kIrRmtCh, 0, 0) != ESP_OK) return false;
+  g_ir_nitems = 0;
+  g_ir_items[g_ir_nitems++] = {{{FLEET_IR_SYNC_US, 1, FLEET_IR_BIT_GAP_US, 0}}};
+  for (int i = 0; i <= FLEET_IR_ID; i++) {
+    g_ir_items[g_ir_nitems++] = {{{FLEET_IR_BURST_US, 1, FLEET_IR_BIT_GAP_US, 0}}};
+  }
+  g_ir_items[g_ir_nitems++] = {{{0, 0, 0, 0}}};
+  return xTaskCreatePinnedToCore(ir_rmt_task, "irtx", 3072, nullptr, 2, nullptr, 1) == pdPASS;
+}
 RoverOta g_ota;
 
 rclc_support_t support;
@@ -118,6 +158,15 @@ rcl_publisher_t tof_front_left_pub;
 rcl_publisher_t tof_front_right_pub;
 rcl_publisher_t tof_l8_cols_pub;
 rcl_publisher_t sonar_range_pub;
+// Pan servo on PCA9685 (bus_side) + combined status [sonar_m, servo_deg, pca_ok].
+rcl_publisher_t tof_status_pub;
+std_msgs__msg__Float32MultiArray tof_status_msg;
+float tof_status_data[6];
+rcl_subscription_t servo_angle_sub;
+std_msgs__msg__Float32 servo_angle_msg;
+bool g_pca_ok = false;
+float g_servo_deg = 90.0f;   // logical: 90 = centre
+volatile bool g_servo_dirty = false;
 rcl_publisher_t ir_detected_pub;
 
 sensor_msgs__msg__Range tof_left_msg;
@@ -128,7 +177,7 @@ sensor_msgs__msg__Range tof_front_right_msg;
 sensor_msgs__msg__Range sonar_range_msg;
 std_msgs__msg__Float32MultiArray tof_l8_cols_msg;
 float tof_l8_cols_data[8];
-std_msgs__msg__Bool ir_detected_msg;
+std_msgs__msg__Int32 ir_detected_msg;
 
 bool entities_ok = false;
 bool uros_wifi_transport_ok = false;
@@ -514,6 +563,53 @@ void fill_range(sensor_msgs__msg__Range& msg, float m, float max_m) {
   msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
 }
 
+bool pca_write(uint8_t reg, uint8_t v) {
+  bus_side.beginTransmission(0x40);
+  bus_side.write(reg);
+  bus_side.write(v);
+  return bus_side.endTransmission() == 0;
+}
+void pca_servo_write(float logical_deg) {
+  if (!g_pca_ok) return;
+  float d = 180.0f - logical_deg - 5.0f;  // same invert + trim as the old T-Display pan
+  if (d < 0.0f) d = 0.0f;
+  if (d > 180.0f) d = 180.0f;
+  const float us = 500.0f + (d / 180.0f) * 2000.0f;
+  const uint16_t off = static_cast<uint16_t>(us * 4096.0f / 20000.0f);
+  bus_side.beginTransmission(0x40);
+  bus_side.write(0x06);  // LED0_ON_L (channel 0)
+  bus_side.write(0);
+  bus_side.write(0);
+  bus_side.write(off & 0xFF);
+  bus_side.write(off >> 8);
+  bus_side.endTransmission();
+}
+bool begin_pca() {
+  if (!i2c_present(bus_side, 0x40)) {
+    Serial.println("PCA9685 0x40 not found on side bus");
+    return false;
+  }
+  const uint8_t prescale = static_cast<uint8_t>(25000000UL / (4096UL * 50) - 1);
+  pca_write(0x00, 0x10);  // sleep
+  pca_write(0xFE, prescale);
+  pca_write(0x00, 0x00);
+  delay(5);
+  pca_write(0x00, 0xA0);  // restart + auto-increment
+  pca_write(0x01, 0x04);
+  g_pca_ok = true;
+  pca_servo_write(g_servo_deg);
+  Serial.printf("PCA9685 OK, servo ch0 @ %.0f deg\n", g_servo_deg);
+  return true;
+}
+void on_servo_angle(const void* msgin) {
+  const auto* m = static_cast<const std_msgs__msg__Float32*>(msgin);
+  float d = m->data;
+  if (d < 0.0f) d = 0.0f;
+  if (d > 180.0f) d = 180.0f;
+  g_servo_deg = d;
+  g_servo_dirty = true;
+}
+
 bool create_entities() {
   allocator = rcl_get_default_allocator();
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
@@ -542,8 +638,21 @@ bool create_entities() {
       &sonar_range_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/sonar/range"));
   RCCHECK(rclc_publisher_init_default(
-      &ir_detected_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-      "rover/ir/detected"));
+      &tof_status_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+      "rover/tof/status"));
+  RCCHECK(rclc_subscription_init_default(
+      &servo_angle_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+      "rover/servo/angle"));
+  tof_status_msg.layout.dim.data = nullptr;
+  tof_status_msg.layout.dim.size = 0;
+  tof_status_msg.layout.dim.capacity = 0;
+  tof_status_msg.layout.data_offset = 0;
+  tof_status_msg.data.data = tof_status_data;
+  tof_status_msg.data.size = 6;
+  tof_status_msg.data.capacity = 6;
+  RCCHECK(rclc_publisher_init_default(
+      &ir_detected_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+      "rover/tof/ir_rx_edges"));
 
   fill_range(tof_left_msg, -1.0f, 1.3f);
   tof_right_msg = tof_left_msg;
@@ -565,9 +674,11 @@ bool create_entities() {
   for (uint8_t i = 0; i < 8; i++) {
     tof_l8_cols_data[i] = std::numeric_limits<float>::quiet_NaN();
   }
-  ir_detected_msg.data = false;
+  ir_detected_msg.data = 0;
 
   RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+  RCCHECK(rclc_executor_add_subscription(&executor, &servo_angle_sub, &servo_angle_msg,
+                                         &on_servo_angle, ON_NEW_DATA));
   return true;
 }
 
@@ -583,6 +694,8 @@ void destroy_entities() {
   RCSOFTCHECK(rcl_publisher_fini(&tof_front_right_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&tof_l8_cols_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&sonar_range_pub, &node));
+  RCSOFTCHECK(rcl_publisher_fini(&tof_status_pub, &node));
+  RCSOFTCHECK(rcl_subscription_fini(&servo_angle_sub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&ir_detected_pub, &node));
   RCSOFTCHECK(rcl_node_fini(&node));
   rclc_support_fini(&support);
@@ -773,7 +886,16 @@ void publish_sensors(uint32_t now) {
     (void)rcl_publish(&sonar_range_pub, &sonar_range_msg, NULL);
   }
 
-  ir_detected_msg.data = digitalRead(IR_RX_PIN) == LOW;
+  tof_status_data[0] = g_sonar_m;
+  tof_status_data[1] = g_servo_deg;
+  tof_status_data[2] = g_pca_ok ? 1.0f : 0.0f;
+  // [3] IR TX frames sent, [4] IR RX edges, [5] RMT ok
+  tof_status_data[3] = static_cast<float>(g_ir_tx_frames);
+  tof_status_data[4] = static_cast<float>(g_ir_rx_edges);
+  tof_status_data[5] = g_ir_rmt_ok ? 1.0f : 0.0f;
+  (void)rcl_publish(&tof_status_pub, &tof_status_msg, NULL);
+
+  ir_detected_msg.data = static_cast<int32_t>(g_ir_rx_edges);
   (void)rcl_publish(&ir_detected_pub, &ir_detected_msg, NULL);
 }
 
@@ -816,16 +938,17 @@ void setup() {
 
   begin_l8();
   begin_sides();
+  begin_pca();
 
   g_sonar_ok = g_sonar.begin(SONAR_TRIG_PIN, SONAR_ECHO_PIN);
   Serial.printf("Sonar TRIG=%d ECHO=%d %s\n", SONAR_TRIG_PIN, SONAR_ECHO_PIN,
                 g_sonar_ok ? "armed" : "fail");
 
-  if (g_ir_tx.begin(IR_TX_PIN, IR_TX_HZ, IR_TX_LEDC_CHANNEL)) {
-    g_ir_tx.set_enabled(false);
-    Serial.printf("IR TX GPIO%d armed (off)\n", IR_TX_PIN);
-  }
-  pinMode(IR_RX_PIN, INPUT);
+  g_ir_rmt_ok = ROVER_IR_BEACON_ON && begin_ir_rmt();
+  Serial.printf("IR TX GPIO%d RMT fleet beacon id %d: %s\n", IR_TX_PIN, FLEET_IR_ID,
+                g_ir_rmt_ok ? "ON" : "FAILED/off");
+  pinMode(IR_RX_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(IR_RX_PIN), on_ir_rx_edge, FALLING);
 
 #if !ROVER_WIFI_FIRST
   wifi_start();
@@ -860,6 +983,11 @@ void loop() {
 
   if (uros_wifi_transport_ok) {
     handle_ros_state();
+  }
+
+  if (g_servo_dirty) {
+    g_servo_dirty = false;
+    pca_servo_write(g_servo_deg);
   }
 
   if ((now - last_pub_ms) >= 100) {

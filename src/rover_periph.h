@@ -33,6 +33,9 @@ class RoverPeriph {
   void note_ir_rear_sample(uint32_t now_ms, float pan_deg, bool hit);
   void note_side_tof(uint32_t now_ms, float left_m, float right_m);
   void note_l8_cols(uint32_t now_ms, const float* cols, uint8_t n);
+  /** Rear-facing sonar → rear LEDs (135/180/225). m <= 0 = no reading. */
+  /** servo_deg < 0 = servo inactive/unknown → sonar is straight back (180° LED). */
+  void note_rear_sonar(uint32_t now_ms, float m, float servo_deg);
 
   static constexpr uint8_t kMelodyReady = RoverSpeaker::kMelodyReady;
   static constexpr uint8_t kMelodyAutoStart = RoverSpeaker::kMelodyAutoStart;
@@ -70,6 +73,9 @@ class RoverPeriph {
   uint32_t _ir_hold_until_ms = 0;
   uint32_t _tof_hold_until_ms = 0;
   uint32_t _l8_hold_until_ms = 0;
+  uint8_t _rear_bin[3] = {255, 255, 255};  // 135 / 180 / 225
+  uint32_t _rear_ms[3] = {0, 0, 0};
+  void paint_rear(uint32_t now_ms, uint8_t* frame);
 
 #if defined(ARDUINO_ARCH_ESP32)
   static void speaker_task(void* arg);
