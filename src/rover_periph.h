@@ -19,6 +19,7 @@ class RoverPeriph {
   void tick(uint32_t now_ms);
 
   void play(uint8_t melody_id);
+  void play_code(uint32_t code);
   void ring_mode(uint8_t mode_id);
   void notify_bump();
   void notify_stall();

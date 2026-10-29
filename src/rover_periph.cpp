@@ -52,6 +52,7 @@ void RoverPeriph::tick(uint32_t now_ms) {
 }
 
 void RoverPeriph::play(uint8_t melody_id) { _speaker.play(melody_id); }
+void RoverPeriph::play_code(uint32_t code) { _speaker.play_code(code); }
 
 void RoverPeriph::ring_mode(uint8_t mode_id) { _ring.set_mode(mode_id); }
 

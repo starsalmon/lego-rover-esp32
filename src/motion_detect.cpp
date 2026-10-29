@@ -128,8 +128,12 @@ void MotionDetect::update(float ax, float ay, float az, float gx, float gy, floa
     }
   }
 
+  // Encoder health gate: if no wheel tick has been seen since boot the encoders
+  // are absent/unpowered, so "zero ticks" says nothing about a stall. Without
+  // this gate a dead encoder makes every drive command trip a stall + 2.5 s cut.
+  const bool enc_alive = combined_ticks > 0u;
   const bool no_wheel_motion =
-      motor >= WHEEL_STALL_MOTOR && tick_delta == 0u;
+      enc_alive && motor >= WHEEL_STALL_MOTOR && tick_delta == 0u;
 
   bool under_rate = false;
   uint32_t need = 0;

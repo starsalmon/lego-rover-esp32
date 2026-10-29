@@ -39,6 +39,7 @@
 #include <rmw_microros/rmw_microros.h>
 #include <sensor_msgs/msg/range.h>
 #include <std_msgs/msg/float32_multi_array.h>
+#include <std_msgs/msg/u_int16_multi_array.h>
 #include <std_msgs/msg/float32.h>
 #include <std_msgs/msg/bool.h>
 #include <std_msgs/msg/int32.h>
@@ -88,6 +89,8 @@ VL53L8CX g_l8(&bus_l8, L8_LPN_PIN);
 VL53L8CX_ResultsData g_l8_results;
 bool g_l8_ok = false;
 float g_l8_cols[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+// Full 8x8 grid in mm (0 = invalid), index row*8+col, same column order as l8_cols (LR swap applied).
+uint16_t g_l8_grid_mm[64] = {0};
 float g_l8_front = -1.0f;
 float g_l8_front_l = -1.0f;
 float g_l8_front_r = -1.0f;
@@ -157,6 +160,9 @@ rcl_publisher_t tof_front_pub;
 rcl_publisher_t tof_front_left_pub;
 rcl_publisher_t tof_front_right_pub;
 rcl_publisher_t tof_l8_cols_pub;
+rcl_publisher_t tof_l8_grid_pub;
+std_msgs__msg__UInt16MultiArray tof_l8_grid_msg;
+uint16_t tof_l8_grid_data[64];
 rcl_publisher_t sonar_range_pub;
 // Pan servo on PCA9685 (bus_side) + combined status [sonar_m, servo_deg, pca_ok].
 rcl_publisher_t tof_status_pub;
@@ -481,6 +487,15 @@ void poll_l8() {
     return;
   }
 
+  for (uint8_t z = 0; z < 64; z++) {
+    uint8_t col = z % 8;
+#if ROVER_L8_SWAP_LR
+    col = 7 - col;
+#endif
+    const float v = zone_ok(g_l8_results, z) ? zone_m(g_l8_results, z) : -1.0f;
+    g_l8_grid_mm[(z / 8) * 8 + col] = (v > 0.02f) ? static_cast<uint16_t>(v * 1000.0f + 0.5f) : 0;
+  }
+
   float cols[8];
   for (uint8_t col = 0; col < 8; col++) {
     float obst = -1.0f;
@@ -635,6 +650,10 @@ bool create_entities() {
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
       "rover/tof/l8_cols"));
   RCCHECK(rclc_publisher_init_default(
+      &tof_l8_grid_pub, &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt16MultiArray),
+      "rover/tof/l8_grid"));
+  RCCHECK(rclc_publisher_init_default(
       &sonar_range_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/sonar/range"));
   RCCHECK(rclc_publisher_init_default(
@@ -671,6 +690,14 @@ bool create_entities() {
   tof_l8_cols_msg.data.data = tof_l8_cols_data;
   tof_l8_cols_msg.data.size = 8;
   tof_l8_cols_msg.data.capacity = 8;
+  tof_l8_grid_msg.layout.dim.data = nullptr;
+  tof_l8_grid_msg.layout.dim.size = 0;
+  tof_l8_grid_msg.layout.dim.capacity = 0;
+  tof_l8_grid_msg.layout.data_offset = 0;
+  tof_l8_grid_msg.data.data = tof_l8_grid_data;
+  tof_l8_grid_msg.data.size = 64;
+  tof_l8_grid_msg.data.capacity = 64;
+  memset(tof_l8_grid_data, 0, sizeof(tof_l8_grid_data));
   for (uint8_t i = 0; i < 8; i++) {
     tof_l8_cols_data[i] = std::numeric_limits<float>::quiet_NaN();
   }
@@ -693,6 +720,7 @@ void destroy_entities() {
   RCSOFTCHECK(rcl_publisher_fini(&tof_front_left_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&tof_front_right_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&tof_l8_cols_pub, &node));
+  RCSOFTCHECK(rcl_publisher_fini(&tof_l8_grid_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&sonar_range_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&tof_status_pub, &node));
   RCSOFTCHECK(rcl_subscription_fini(&servo_angle_sub, &node));
@@ -875,6 +903,8 @@ void publish_sensors(uint32_t now) {
     (void)rcl_publish(&tof_front_left_pub, &tof_front_left_msg, NULL);
     (void)rcl_publish(&tof_front_right_pub, &tof_front_right_msg, NULL);
     (void)rcl_publish(&tof_l8_cols_pub, &tof_l8_cols_msg, NULL);
+    memcpy(tof_l8_grid_data, g_l8_grid_mm, sizeof(tof_l8_grid_data));
+    (void)rcl_publish(&tof_l8_grid_pub, &tof_l8_grid_msg, NULL);
   }
 
   if (g_sonar_ok) {

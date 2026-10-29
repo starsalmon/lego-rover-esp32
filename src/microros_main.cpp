@@ -111,6 +111,8 @@ static sensor_msgs__msg__Range ring_tl_msg, ring_tr_msg;
 static char ring_tl_frame[24], ring_tr_frame[24];
 static volatile bool ring_l8_pending = false;
 static float ring_l8_data[8];
+static float ring_l8_prev[8] = {};
+static volatile uint32_t ring_l8_change_ms = 0;
 static volatile float ring_side_l = -1.0f, ring_side_r = -1.0f;
 static volatile bool ring_side_pending = false;
 static float ring_sonar_m = -1.0f, ring_servo_deg = -1.0f;
@@ -126,7 +128,7 @@ static rcl_subscription_t sonar_cal_sweep_sub;
 static rcl_publisher_t imu_pub;
 static rcl_publisher_t drive_diag_pub;
 static std_msgs__msg__String drive_diag_msg;
-static char drive_diag_buf[384];
+static char drive_diag_buf[512];
 static uint32_t imu_retry_count = 0;
 static uint32_t tick_pub_count = 0;
 static rcl_publisher_t bump_pub;
@@ -193,6 +195,9 @@ static float tof_l8_cols_data[8];
 #endif
 static std_msgs__msg__Bool session_msg;
 static std_msgs__msg__UInt32 heartbeat_msg;
+static rcl_subscription_t speaker_sub;
+static std_msgs__msg__UInt32 speaker_msg;
+static void on_speaker(const void *msgin);
 #if defined(ROVER_SONAR)
 static std_msgs__msg__Bool sonar_cal_sweep_msg;
 #endif
@@ -211,6 +216,10 @@ static RoverDisplay display;
 static RoverOta ota;
 static RoverUiData ui;
 static volatile uint32_t stall_block_until = 0;
+static volatile uint32_t diag_stall_count = 0;
+static volatile uint32_t diag_bump_count = 0;
+static volatile uint32_t diag_cmd_count = 0;
+static volatile uint32_t diag_cmd_drop = 0;
 static bool pi_session_sub_value = false;
 static uint32_t last_pi_traffic_ms = 0;
 static bool bridge_live_latched = false;
@@ -247,6 +256,13 @@ static RoverVl53L8 front_tof;
 #endif
 #if defined(ROVER_PERIPH)
 static RoverPeriph rover_periph;
+static void on_speaker(const void *msgin) {
+#if defined(ROVER_PERIPH)
+  rover_periph.play_code(((const std_msgs__msg__UInt32 *)msgin)->data);
+#else
+  (void)msgin;
+#endif
+}
 static bool periph_ready_played = false;
 #endif
 #endif
@@ -505,6 +521,12 @@ static void on_ring_l8(const void *msgin) {
   const auto *m = static_cast<const std_msgs__msg__Float32MultiArray *>(msgin);
   const size_t n = m->data.size < 8 ? m->data.size : 8;
   for (size_t i = 0; i < 8; i++) ring_l8_data[i] = (i < n) ? m->data.data[i] : -1.0f;
+  bool same = true;
+  for (size_t i = 0; i < 8; i++) {
+    if (ring_l8_data[i] != ring_l8_prev[i]) same = false;
+    ring_l8_prev[i] = ring_l8_data[i];
+  }
+  if (!same) ring_l8_change_ms = millis();   // frozen (bit-identical) frames don't count as fresh
   ring_l8_pending = true;
   ring_l8_rx++;
   ring_l8_last_ms = millis();
@@ -835,6 +857,7 @@ static void publish_bump_event(const char* source) {
     return;
   }
   bump_event_cooldown_until = now + BUMP_COOLDOWN_MS;
+  diag_bump_count++;
 
   if (ros_state == RosState::kConnected) {
     bump_msg.data = true;
@@ -1074,6 +1097,10 @@ static bool create_entities() {
 #endif
   RCCHECK(rclc_executor_add_subscription(
     &executor, &sub, &cmd_msg, &on_cmd, ON_NEW_DATA));
+  RCCHECK(rclc_subscription_init_default(
+    &speaker_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32), "rover/speaker/code"));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &speaker_sub, &speaker_msg, &on_speaker, ON_NEW_DATA));
   bump_msg.data = false;
   stall_msg.data = false;
   button_msg.data = false;
@@ -1141,6 +1168,7 @@ static void destroy_entities() {
 
   RCSOFTCHECK(rcl_subscription_fini(&sub, &node));
   RCSOFTCHECK(rcl_subscription_fini(&session_sub, &node));
+  RCSOFTCHECK(rcl_subscription_fini(&speaker_sub, &node));
   RCSOFTCHECK(rcl_subscription_fini(&heartbeat_sub, &node));
 #if defined(RING_REMOTE_TOF)
   RCSOFTCHECK(rcl_subscription_fini(&ring_l8_sub, &node));
@@ -1328,10 +1356,13 @@ static void apply_drive(float yaw_rate, float dt) {
 }
 
 void on_cmd(const void *msgin) {
+  diag_cmd_count++;
   if (drive_blocked()) {
+    diag_cmd_drop++;
     return;
   }
   if (!pi_session_sub_value) {
+    diag_cmd_drop++;
     return;
   }
   const auto *msg = (const geometry_msgs__msg__Twist *)msgin;
@@ -2217,6 +2248,7 @@ void loop() {
     }
     if (imu_stall_pending) {
       imu_stall_pending = false;
+      diag_stall_count++;
       stall_msg.data = true;
       RCSOFTCHECK(rcl_publish(&stall_pub, &stall_msg, NULL));
       status_led.trigger(LedEvent::kStall);
@@ -2343,6 +2375,21 @@ void loop() {
 #endif
                );
       if (n < 0) n = 0;
+      if (n < (int)sizeof(drive_diag_buf) - 1) {
+        const int now_ms_i = (int)millis();
+        const int m = snprintf(drive_diag_buf + n, sizeof(drive_diag_buf) - n,
+               " estop=%d batcrit=%d sblk=%ld ses=%d lin=%.2f ang=%.2f tgt=%.2f/%.2f cur=%.2f/%.2f stalls=%lu bumps=%lu cmds=%lu drop=%lu",
+#ifdef ROVER_TDISPLAY_S3
+               (int)estop.active(), (int)battery.critical(),
+#else
+               0, 0,
+#endif
+               (long)((int)stall_block_until - now_ms_i), (int)pi_session_sub_value, last_lin, last_ang,
+               drv.tgt_left(), drv.tgt_right(), drv.cur_left(), drv.cur_right(),
+               (unsigned long)diag_stall_count, (unsigned long)diag_bump_count,
+               (unsigned long)diag_cmd_count, (unsigned long)diag_cmd_drop);
+        if (m > 0) n += m;
+      }
       if (n >= (int)sizeof(drive_diag_buf)) n = sizeof(drive_diag_buf) - 1;
       drive_diag_msg.data.data = drive_diag_buf;
       drive_diag_msg.data.size = (size_t)n;
@@ -2537,6 +2584,9 @@ void loop() {
     ui.tof_right_ok = ring_side_r > 0.0f;
     ui.tof_left_m = ring_side_l;
     ui.tof_right_m = ring_side_r;
+    ui.l8_enabled = true;
+    ui.l8_fresh = ring_l8_change_ms && (now - ring_l8_change_ms) < 1000 && (now - ring_l8_last_ms) < 1000;
+    for (int i = 0; i < 8; i++) ui.l8[i] = ring_l8_data[i];
   }
 #endif
   ui.boot_reason = boot_reason_buf[0] ? boot_reason_buf : nullptr;

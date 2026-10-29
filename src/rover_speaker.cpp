@@ -8,6 +8,8 @@ constexpr uint8_t kDutyBits = 8;
 constexpr uint8_t kDutyOn = (1u << kDutyBits) / 3;
 constexpr uint16_t kNoteGapMs = 5;
 constexpr float kVol = 0.48f;
+// Ready chime only — the connect tune. Every other cue stays at kVol.
+constexpr float kVolReady = 0.16f;
 
 // Notification cues — “Nokia-ish” bleeps: short, stepwise, slightly moody.
 // Keep these as UI pips, not toy chirps and not single microwave beeps.
@@ -141,6 +143,7 @@ void RoverSpeaker::start_melody(uint8_t melody_id) {
   if (!_ok || melody_id == 0 || melody_id >= sizeof(kMelodies) / sizeof(kMelodies[0])) {
     return;
   }
+  _vol = (melody_id == kMelodyReady) ? kVolReady : kVol;
   const MelodyDef& def = kMelodies[melody_id];
   if (def.count == 0) {
     return;
@@ -153,6 +156,26 @@ void RoverSpeaker::start_melody(uint8_t melody_id) {
 }
 
 void RoverSpeaker::play(uint8_t melody_id) { start_melody(melody_id); }
+
+void RoverSpeaker::play_code(uint32_t code) {
+  if (!_ok) return;
+  _vol = kVol;
+  const uint16_t hz1 = code & 0xFFF, hz2 = (code >> 12) & 0xFFF;
+  uint8_t reps = (code >> 24) & 0xF;
+  const uint16_t ms = 40 + 20 * ((code >> 28) & 0xF);
+  if (reps == 0) reps = 1;
+  uint8_t n = 0;
+  for (uint8_t r = 0; r < reps && n + 2 <= 30; r++) {
+    if (hz1) _custom[n++] = {hz1, ms};
+    if (hz2) _custom[n++] = {hz2, ms};
+  }
+  if (n == 0) return;
+  _melody = _custom;
+  _melody_len = n;
+  _note_idx = 0;
+  _in_gap = false;
+  _note_until_ms = 0;
+}
 
 void RoverSpeaker::play_named(const char* name) {
   if (name == nullptr) return;
@@ -199,10 +222,10 @@ void RoverSpeaker::tick(uint32_t now_ms) {
   } else {
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
     ledcWriteTone(static_cast<uint8_t>(_pin), n.hz);
-    ledcWrite(static_cast<uint8_t>(_pin), static_cast<uint32_t>(kDutyOn * kVol));
+    ledcWrite(static_cast<uint8_t>(_pin), static_cast<uint32_t>(kDutyOn * _vol));
 #else
     ledcWriteTone(static_cast<uint8_t>(_ch), n.hz);
-    ledcWrite(static_cast<uint8_t>(_ch), static_cast<uint32_t>(kDutyOn * kVol));
+    ledcWrite(static_cast<uint8_t>(_ch), static_cast<uint32_t>(kDutyOn * _vol));
 #endif
   }
   _note_until_ms = now_ms + n.ms;

@@ -401,9 +401,35 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
   g.printf("L %.2f  R %.2f", data.motor_l, data.motor_r);
   y += kLineH2;
 
-  g.setCursor(kTextX, y);
-  g.printf("v %.2f  w %.2f", data.cmd_lin, data.cmd_ang);
-  y += kLineH2;
+  if (data.l8_enabled) {   // L8: 8 column bars (col 0 = left), colour by distance, closest in cm; grey '--' when stale/frozen
+    g.setTextColor(data.l8_fresh ? TFT_WHITE : TFT_DARKGREY, TFT_BLACK);
+    g.setCursor(kTextX, y);
+    g.print("L8");
+    const int bx = kTextX + 30, bw = 18, gap = 3, bh = kLineH2 - 3;
+    float mn = 99.0f;
+    for (int i = 0; i < 8; i++) {
+      const float d = data.l8[i];
+      const bool ok = d > 0.02f;
+      if (ok && d < mn) mn = d;
+      uint16_t col = TFT_DARKGREY;
+      if (data.l8_fresh && ok) col = d < 0.30f ? TFT_RED : d < 0.60f ? TFT_ORANGE : d < 1.00f ? TFT_YELLOW : TFT_GREEN;
+      const float f = ok ? (d > 2.0f ? 1.0f : d / 2.0f) : 0.0f;
+      int h = (int)(f * bh); if (h < 2) h = 2;
+      const int x = bx + i * (bw + gap);
+      g.drawRect(x, y, bw, bh, TFT_DARKGREY);
+      g.fillRect(x + 1, y + bh - h, bw - 2, h - 1 > 0 ? h - 1 : 1, col);
+    }
+    g.setCursor(bx + 8 * (bw + gap) + 4, y);
+    if (data.l8_fresh && mn < 98.0f) {
+      g.setTextColor(mn < 0.30f ? TFT_RED : mn < 0.60f ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
+      g.printf("%dcm", (int)(mn * 100.0f + 0.5f));
+    } else {
+      g.setTextColor(TFT_DARKGREY, TFT_BLACK);
+      g.print("--");
+    }
+    g.setTextColor(TFT_WHITE, TFT_BLACK);
+    y += kLineH2;
+  }
 
   if (data.sonar_enabled) {
     const bool show_summary =
@@ -633,7 +659,10 @@ bool RoverDisplay::_changed(const RoverUiData &data) const {
   // (including the sonar pan servo update) for tens of ms each time — that
   // was the real cause of the "jerky" pan sweep, not the PCA9685 or I2C.
   if (fabsf(data.bat_v - _last.bat_v) >= 0.05f) return true;
-  if (!feq(data.cmd_lin, _last.cmd_lin) || !feq(data.cmd_ang, _last.cmd_ang)) return true;
+  if (data.l8_enabled != _last.l8_enabled || data.l8_fresh != _last.l8_fresh) return true;
+  for (int i = 0; i < 8; i++) {
+    if (fabsf(data.l8[i] - _last.l8[i]) >= 0.03f) return true;
+  }
   if (!feq(data.motor_l, _last.motor_l) || !feq(data.motor_r, _last.motor_r)) return true;
   if (data.ir_enabled != _last.ir_enabled || data.ir_ok != _last.ir_ok) return true;
   if (data.ir_out_ok != _last.ir_out_ok) return true;

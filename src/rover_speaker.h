@@ -11,6 +11,8 @@ class RoverSpeaker {
 
   void play(uint8_t melody_id);
   void play_named(const char* name);
+  // Custom pattern from ROS: bits 0-11 hz1, 12-23 hz2 (0 = none), 24-27 repeats (1-15), 28-31 note len (40 + 20*n ms).
+  void play_code(uint32_t code);
 
   static constexpr uint8_t kMelodyReady = 1;
   static constexpr uint8_t kMelodyAutoStart = 2;
@@ -42,4 +44,6 @@ class RoverSpeaker {
   uint8_t _note_idx = 0;
   uint32_t _note_until_ms = 0;
   bool _in_gap = false;
+  float _vol = 0.48f;
+  Note _custom[30];
 };
