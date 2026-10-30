@@ -30,7 +30,7 @@ volatile int g_volume = 12;
 char g_now[200] = "";
 
 void audio_task(void *) {
-  g_audio = new Audio();
+  g_audio = new Audio(false, 3, I2S_NUM_1);  // I2S0 is the only PDM-RX port on the S3: the whistle mic has it
   g_audio->setPinout(AICAM_SPK_I2S_BCLK, AICAM_SPK_I2S_LRC, AICAM_SPK_I2S_DOUT);
   g_audio->setVolume(g_volume);
   Cmd c;
@@ -215,6 +215,8 @@ void audio_play_startup() {
     Serial.println("[audio] no startup.mp3 on LittleFS");
   }
 }
+
+bool audio_is_playing() { return g_playing; }
 
 void audio_register(httpd_handle_t s) {
   const httpd_uri_t uris[] = {

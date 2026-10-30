@@ -17,6 +17,7 @@
 #include <esp_http_server.h>
 
 #include "aicam_audio.h"
+#include "aicam_whistle.h"
 #include "rover_ota.h"
 #include "rover_pins_aicam.h"
 
@@ -557,7 +558,7 @@ esp_err_t h_index(httpd_req_t *req) {
                      "<html><body><h3>" ROVER_CAM_HOSTNAME "</h3>"
                      "<p><a href=/capture>/capture</a> | <a href=/status>/status</a> | "
                      "stream on :81/stream | /control?var=..&val=.. | /ir?on=0|1 | "
-                     "<a href=/sounds>/sounds</a> | /play?file=chime | /stop | /volume?v=0-21</p>"
+                     "<a href=/sounds>/sounds</a> | /play?file=chime | /stop | /volume?v=0-21 | <a href=/whistle>/whistle</a></p>"
                      "<img id=s style='max-width:100%'><script>"
                      "s.src=location.protocol+'//'+location.hostname+':81/stream'</script>"
                      "</body></html>");
@@ -581,6 +582,7 @@ void start_http() {
     };
     for (const auto &u : uris) httpd_register_uri_handler(g_http, &u);
     audio_register(g_http);
+    whistle_register(g_http);
   }
   if (!g_jpg) {
     g_jpg = static_cast<uint8_t *>(ps_malloc(kJpgCap));
@@ -606,6 +608,7 @@ void setup() {
                 static_cast<int>(esp_reset_reason()), ESP.getPsramSize());
   g_cam_ok = init_camera();
   audio_begin();
+  whistle_begin();
 
   g_ota.begin(ROVER_CAM_HOSTNAME);  // starts Wi-Fi STA (credentials from platformio_private.ini)
   WiFi.setAutoReconnect(true);
