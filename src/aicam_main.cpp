@@ -23,7 +23,7 @@
 #define ROVER_CAM_HOSTNAME "rover-cam"
 #endif
 #ifndef CAM_DEFAULT_FRAMESIZE
-#define CAM_DEFAULT_FRAMESIZE FRAMESIZE_XGA  // 1024x768 (day defaults 2026-10-22)
+#define CAM_DEFAULT_FRAMESIZE FRAMESIZE_VGA  // 640x480 (live-tested 2026-10-30, matches Beeper)
 #endif
 #ifndef CAM_DEFAULT_QUALITY
 #define CAM_DEFAULT_QUALITY 12  // 0-63, lower = better
@@ -75,20 +75,20 @@ struct CamSettings {
   int aec = 1;  // 0 = manual exposure (fixed), 1 = auto
   int aec_value = CAM_DEFAULT_AEC_VALUE;
   int aec2 = 1;  // HA: AEC2 on
-  int ae_level = 2;  // HA: AE level +2
+  int ae_level = 0;  // 0: +2 blew highlights (live-tested 2026-10-30)
   int agc = 1;       // 0 = manual gain
   int agc_gain = CAM_DEFAULT_AGC_GAIN;
-  int gainceiling = 4;  // 0=2x 1=4x 2=8x 3=16x 4=32x. Boot in day at 32x for this ~6 lux room.
+  int gainceiling = 3;  // 0=2x 1=4x 2=8x 3=16x 4=32x. 16x: 32x was grainy/banded, 8x too dark (2026-10-30).
   // ALS auto day/night: picks gainceiling from the LTR-308 lux with hysteresis.
   int als_auto = 1;
   // This room reads about 8 lux on the LTR-308 and is still bright enough for color.
   // The old 15/40 trip points locked night+IR here and washed the orange out.
   int lux_night = 3;    // go to night profile below this (held 3 s)
   int lux_day = 4;      // back to day profile above this (held 3 s)
-  int day_ceiling = 4;  // 32x: this room is ~6 lux, 8x was still a dark frame
+  int day_ceiling = 3;  // 16x (live-tested 2026-10-30 at ~5 lux)
   int night_ceiling = 2;  // 8x: dark rooms (16x was the old grainy look)
   int awb = 1;
-  int brightness = 1, contrast = 0, saturation = 2;
+  int brightness = 0, contrast = 0, saturation = 0;  // +1/+2 gave purple cast + washout (2026-10-30)
   int hmirror = CAM_DEFAULT_HMIRROR, vflip = CAM_DEFAULT_VFLIP;
   int lenc = 1, bpc = 1, wpc = 1, dcw = 1, colorbar = 0;
   int special_effect = 0;  // 0 none, 2 grayscale
