@@ -29,8 +29,12 @@
 // Light sensor
 #define AICAM_LTR308_ADDR 0x53
 
-// Audio - defined for later, NOT initialised by the camera firmware.
-// UNVERIFIED: the HA config only notes "PDM mic CLK GPIO46/45, DATA GPIO39".
-// Check the DFRobot DFR1154 schematic before using these.
-#define AICAM_MIC_PDM_CLK 46
+// Audio, per DFRobot DFR1154 wiki/examples (Recording & Playback, Play Online Music):
+//   PDM mic: CLK GPIO38, DATA GPIO39
+//   MAX98357 I2S amp -> SPK (MX1.25-2P, 4R 1.5W / 8R 1W): BCLK GPIO45, LRC/WS GPIO46, DOUT GPIO42
+// (Earlier HA note "mic CLK 46/45" was wrong: 45/46 are the amp's I2S clocks.)
+#define AICAM_MIC_PDM_CLK 38
 #define AICAM_MIC_PDM_DATA 39
+#define AICAM_SPK_I2S_BCLK 45
+#define AICAM_SPK_I2S_LRC 46
+#define AICAM_SPK_I2S_DOUT 42

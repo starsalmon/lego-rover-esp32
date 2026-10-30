@@ -16,6 +16,7 @@
 #include <esp_camera.h>
 #include <esp_http_server.h>
 
+#include "aicam_audio.h"
 #include "rover_ota.h"
 #include "rover_pins_aicam.h"
 
@@ -555,7 +556,8 @@ esp_err_t h_index(httpd_req_t *req) {
   httpd_resp_sendstr(req,
                      "<html><body><h3>" ROVER_CAM_HOSTNAME "</h3>"
                      "<p><a href=/capture>/capture</a> | <a href=/status>/status</a> | "
-                     "stream on :81/stream | /control?var=..&val=.. | /ir?on=0|1</p>"
+                     "stream on :81/stream | /control?var=..&val=.. | /ir?on=0|1 | "
+                     "<a href=/sounds>/sounds</a> | /play?file=chime | /stop | /volume?v=0-21</p>"
                      "<img id=s style='max-width:100%'><script>"
                      "s.src=location.protocol+'//'+location.hostname+':81/stream'</script>"
                      "</body></html>");
@@ -566,6 +568,8 @@ void start_http() {
   httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
   cfg.server_port = 80;
   cfg.ctrl_port = 32768;
+  cfg.max_uri_handlers = 16;
+  cfg.stack_size = 8192;  // /upload + /sounds use LittleFS
   if (httpd_start(&g_http, &cfg) == ESP_OK) {
     const httpd_uri_t uris[] = {
         {"/", HTTP_GET, h_index, nullptr},
@@ -576,6 +580,7 @@ void start_http() {
         {"/status", HTTP_GET, h_status, nullptr},
     };
     for (const auto &u : uris) httpd_register_uri_handler(g_http, &u);
+    audio_register(g_http);
   }
   if (!g_jpg) {
     g_jpg = static_cast<uint8_t *>(ps_malloc(kJpgCap));
@@ -600,6 +605,7 @@ void setup() {
   Serial.printf("rover-cam boot, reset_reason %d (1=poweron 3=sw 4=panic 5=int_wdt 6=task_wdt 7=wdt 9=brownout), PSRAM %u bytes\n",
                 static_cast<int>(esp_reset_reason()), ESP.getPsramSize());
   g_cam_ok = init_camera();
+  audio_begin();
 
   g_ota.begin(ROVER_CAM_HOSTNAME);  // starts Wi-Fi STA (credentials from platformio_private.ini)
   WiFi.setAutoReconnect(true);
