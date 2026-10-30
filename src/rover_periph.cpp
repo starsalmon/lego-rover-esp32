@@ -68,8 +68,15 @@ void RoverPeriph::notify_stall() {
 
 void RoverPeriph::notify_escape() { ring_mode(kRingEscape); }
 
+// Boot/connect tune moved to the AI cam (data/startup.mp3). Build with
+// -DROVER_READY_TUNE=1 to bring the buzzer "ready" melody back.
+#ifndef ROVER_READY_TUNE
+#define ROVER_READY_TUNE 0
+#endif
 void RoverPeriph::notify_ready() {
+#if ROVER_READY_TUNE
   play(kMelodyReady);
+#endif
   ring_mode(kRingReady);
 }
 

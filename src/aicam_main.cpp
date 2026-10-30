@@ -620,6 +620,7 @@ void loop() {
     WiFi.setSleep(false);
     start_http();
     http_started = true;
+    audio_play_startup();
   }
   // Status LED: solid = streaming-ready, blink = no Wi-Fi, fast blink = camera failed.
   const uint32_t now = millis();

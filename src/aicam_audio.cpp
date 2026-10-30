@@ -202,6 +202,20 @@ void audio_begin() {
   xTaskCreatePinnedToCore(audio_task, "audio", 8192, nullptr, 3, nullptr, 0);
 }
 
+// Boot tune: play /startup.mp3 once (called after Wi-Fi is up). Silent if missing.
+void audio_play_startup() {
+  static bool done = false;
+  if (done || !g_fs_ok) return;
+  done = true;
+  char path[64];
+  if (find_file("startup.mp3", path, sizeof(path))) {
+    Serial.printf("[audio] startup tune %s\n", path);
+    send(CMD_FILE, path);
+  } else {
+    Serial.println("[audio] no startup.mp3 on LittleFS");
+  }
+}
+
 void audio_register(httpd_handle_t s) {
   const httpd_uri_t uris[] = {
       {"/play", HTTP_GET, h_play, nullptr},
