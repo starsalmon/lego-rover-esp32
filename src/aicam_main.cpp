@@ -80,14 +80,14 @@ struct CamSettings {
   int ae_level = 0;  // 0: +2 blew highlights (live-tested 2026-10-30)
   int agc = 1;       // 0 = manual gain
   int agc_gain = CAM_DEFAULT_AGC_GAIN;
-  int gainceiling = 3;  // 0=2x 1=4x 2=8x 3=16x 4=32x. 16x: 32x was grainy/banded, 8x too dark (2026-10-30).
+  int gainceiling = 2;  // 0=2x 1=4x 2=8x 3=16x 4=32x. 16x: 32x was grainy/banded, 8x too dark (2026-10-30).
   // ALS auto day/night: picks gainceiling from the LTR-308 lux with hysteresis.
   int als_auto = 1;
   // This room reads about 8 lux on the LTR-308 and is still bright enough for color.
   // The old 15/40 trip points locked night+IR here and washed the orange out.
   int lux_night = 3;    // go to night profile below this (held 3 s)
   int lux_day = 4;      // back to day profile above this (held 3 s)
-  int day_ceiling = 3;  // 16x (live-tested 2026-10-30 at ~5 lux)
+  int day_ceiling = 2;  // 8x: 16x gave gain ~190 + grain/banding at ~18 lux (Cain OK 2026-10-31)
   int night_ceiling = 2;  // 8x: dark rooms (16x was the old grainy look)
   int awb = 1;
   int brightness = 0, contrast = 0, saturation = 0;  // +1/+2 gave purple cast + washout (2026-10-30)
@@ -105,6 +105,7 @@ struct CamSettings {
   // 1300 gives ~17 fps / ~106 mean in Cain's room. Must stay >= 783 (QVGA default).
   int night_vts = 1564;  // HA normal frame length; HA night used 3136 + insertion 7 (~2 fps)
   int ir_auto = 1;  // IR LEDs follow the night profile
+  int ir_grey = 1;  // greyscale while IR LEDs are on (no IR-cut filter -> purple cast broke YOLO)
 } g_set;
 
 bool g_is_night = false;
@@ -203,7 +204,7 @@ void push_settings() {
   s->set_hmirror(s, g_set.hmirror);
   s->set_vflip(s, g_set.vflip);
   s->set_colorbar(s, g_set.colorbar);
-  s->set_special_effect(s, g_set.special_effect);
+  s->set_special_effect(s, (g_ir_on && g_set.ir_grey) ? 2 : g_set.special_effect);
   if (g_set.night) {
     apply_night(s);  // last: overrides AEC/AGC/ceilings
   } else if (g_set.aec && g_set.agc) {
@@ -236,6 +237,7 @@ bool apply_control(const char *var, int val) {
       {"gainceiling", &g_set.gainceiling, 0, 5},
       {"als_auto", &g_set.als_auto, 0, 1},
       {"ir_auto", &g_set.ir_auto, 0, 1},
+      {"ir_grey", &g_set.ir_grey, 0, 1},
       {"lux_night", &g_set.lux_night, 0, 10000},
       {"lux_day", &g_set.lux_day, 0, 10000},
       {"day_ceiling", &g_set.day_ceiling, 0, 5},
@@ -322,6 +324,8 @@ void als_tick() {
 void set_ir(bool on) {
   g_ir_on = on;
   digitalWrite(AICAM_IR_LED_PIN, on ? HIGH : LOW);
+  if (sensor_t *s = g_cam_ok ? esp_camera_sensor_get() : nullptr)
+    s->set_special_effect(s, (on && g_set.ir_grey) ? 2 : g_set.special_effect);
 }
 
 bool init_camera() {
