@@ -119,7 +119,7 @@ static float ring_sonar_m = -1.0f, ring_servo_deg = -1.0f;
 static uint32_t ring_status_ms = 0;
 static volatile bool ring_status_pending = false;
 static std_msgs__msg__Float32MultiArray ring_status_msg;
-static float ring_status_buf[8];
+static float ring_status_buf[16];
 static uint32_t ring_l8_rx = 0, ring_side_rx = 0, ring_l8_last_ms = 0;
 #endif
 #if defined(ROVER_SONAR)
@@ -1050,7 +1050,7 @@ static bool create_entities() {
 #if defined(RING_REMOTE_TOF)
   ring_status_msg.data.data = ring_status_buf;
   ring_status_msg.data.size = 0;
-  ring_status_msg.data.capacity = 8;
+  ring_status_msg.data.capacity = 16;  // Pro S3 b6e41ca+ sends 11 floats
   ring_l8_msg.data.data = ring_l8_buf;
   ring_l8_msg.data.size = 0;
   ring_l8_msg.data.capacity = 8;
