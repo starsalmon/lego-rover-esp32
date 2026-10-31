@@ -167,7 +167,10 @@ rcl_publisher_t sonar_range_pub;
 // Pan servo on PCA9685 (bus_side) + combined status [sonar_m, servo_deg, pca_ok].
 rcl_publisher_t tof_status_pub;
 std_msgs__msg__Float32MultiArray tof_status_msg;
-float tof_status_data[6];
+float tof_status_data[11];
+// L8 diag: frames read, poll errors, valid zones / zones with no target in last frame, most common target_status
+uint32_t g_l8_frames = 0, g_l8_poll_err = 0;
+uint8_t g_l8_valid_z = 0, g_l8_notgt_z = 0, g_l8_top_status = 255;
 rcl_subscription_t servo_angle_sub;
 std_msgs__msg__Float32 servo_angle_msg;
 bool g_pca_ok = false;
@@ -484,7 +487,21 @@ void poll_l8() {
     return;
   }
   if (g_l8.get_ranging_data(&g_l8_results) != 0) {
+    g_l8_poll_err++;
     return;
+  }
+  g_l8_frames++;
+  {
+    uint8_t hist[256] = {0};
+    uint8_t valid = 0, notgt = 0;
+    for (uint8_t z = 0; z < 64; z++) {
+      if (g_l8_results.nb_target_detected[z] < 1) { notgt++; continue; }
+      hist[g_l8_results.target_status[VL53L8CX_NB_TARGET_PER_ZONE * z]]++;
+      if (zone_ok(g_l8_results, z) && zone_m(g_l8_results, z) > 0.0f) valid++;
+    }
+    uint8_t top = 255;
+    for (int i = 0, best = 0; i < 256; i++) if (hist[i] > best) { best = hist[i]; top = (uint8_t)i; }
+    g_l8_valid_z = valid; g_l8_notgt_z = notgt; g_l8_top_status = top;
   }
 
   for (uint8_t z = 0; z < 64; z++) {
@@ -667,7 +684,7 @@ bool create_entities() {
   tof_status_msg.layout.dim.capacity = 0;
   tof_status_msg.layout.data_offset = 0;
   tof_status_msg.data.data = tof_status_data;
-  tof_status_msg.data.size = 6;
+  tof_status_msg.data.size = 11;
   tof_status_msg.data.capacity = 6;
   RCCHECK(rclc_publisher_init_default(
       &ir_detected_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
@@ -923,6 +940,12 @@ void publish_sensors(uint32_t now) {
   tof_status_data[3] = static_cast<float>(g_ir_tx_frames);
   tof_status_data[4] = static_cast<float>(g_ir_rx_edges);
   tof_status_data[5] = g_ir_rmt_ok ? 1.0f : 0.0f;
+  // [6] L8 frames read, [7] L8 poll errors, [8] valid zones (last frame), [9] no-target zones, [10] most common target_status (255 = none)
+  tof_status_data[6] = static_cast<float>(g_l8_frames);
+  tof_status_data[7] = static_cast<float>(g_l8_poll_err);
+  tof_status_data[8] = static_cast<float>(g_l8_valid_z);
+  tof_status_data[9] = static_cast<float>(g_l8_notgt_z);
+  tof_status_data[10] = static_cast<float>(g_l8_top_status);
   (void)rcl_publish(&tof_status_pub, &tof_status_msg, NULL);
 
   ir_detected_msg.data = static_cast<int32_t>(g_ir_rx_edges);
