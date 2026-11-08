@@ -170,6 +170,7 @@ std_msgs__msg__Float32MultiArray tof_status_msg;
 float tof_status_data[11];
 // L8 diag: frames read, poll errors, valid zones / zones with no target in last frame, most common target_status
 uint32_t g_l8_frames = 0, g_l8_poll_err = 0;
+uint32_t g_l8_sample_ms = 0;  // millis() when g_l8_results was last applied
 uint8_t g_l8_valid_z = 0, g_l8_notgt_z = 0, g_l8_top_status = 255;
 rcl_subscription_t servo_angle_sub;
 std_msgs__msg__Float32 servo_angle_msg;
@@ -491,6 +492,7 @@ void poll_l8() {
     return;
   }
   g_l8_frames++;
+  g_l8_sample_ms = millis();
   {
     uint8_t hist[256] = {0};
     uint8_t valid = 0, notgt = 0;
@@ -685,7 +687,7 @@ bool create_entities() {
   tof_status_msg.layout.data_offset = 0;
   tof_status_msg.data.data = tof_status_data;
   tof_status_msg.data.size = 11;
-  tof_status_msg.data.capacity = 6;
+  tof_status_msg.data.capacity = 11;
   RCCHECK(rclc_publisher_init_default(
       &ir_detected_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
       "rover/tof/ir_rx_edges"));
@@ -878,12 +880,18 @@ void handle_ros_state() {
   }
 }
 
+static void stamp_from_ms(uint32_t ms, int32_t& sec, uint32_t& nsec) {
+  sec = static_cast<int32_t>(ms / 1000);
+  nsec = static_cast<uint32_t>((ms % 1000) * 1000000UL);
+}
+
 void publish_sensors(uint32_t now) {
   if (ros_state != RosState::kConnected || !entities_ok) {
     return;
   }
-  const int32_t sec = static_cast<int32_t>(now / 1000);
-  const uint32_t nsec = static_cast<uint32_t>((now % 1000) * 1000000UL);
+  int32_t sec;
+  uint32_t nsec;
+  stamp_from_ms(now, sec, nsec);
 
   if (g_side_l_ok) {
     fill_range(tof_left_msg, g_side_l_m, 1.3f);
@@ -899,29 +907,37 @@ void publish_sensors(uint32_t now) {
   }
 
   if (g_l8_ok) {
-    for (uint8_t i = 0; i < 8; i++) {
-      tof_l8_cols_data[i] =
-          (g_l8_cols[i] > 0.0f) ? g_l8_cols[i]
-                                : std::numeric_limits<float>::quiet_NaN();
+    static uint32_t l8_last_pub_frame = 0;
+    const bool l8_fresh = (g_l8_frames > 0) && (g_l8_frames != l8_last_pub_frame);
+    if (l8_fresh) {
+      l8_last_pub_frame = g_l8_frames;
+      const uint32_t sm = (g_l8_sample_ms > 0) ? g_l8_sample_ms : now;
+      stamp_from_ms(sm, sec, nsec);
+      for (uint8_t i = 0; i < 8; i++) {
+        tof_l8_cols_data[i] =
+            (g_l8_cols[i] > 0.0f) ? g_l8_cols[i]
+                                  : std::numeric_limits<float>::quiet_NaN();
+      }
+      fill_range(tof_front_msg, g_l8_front, 4.0f);
+      tof_front_msg.field_of_view = 0.80f;
+      tof_front_msg.header.stamp.sec = sec;
+      tof_front_msg.header.stamp.nanosec = nsec;
+      fill_range(tof_front_left_msg, g_l8_front_l, 4.0f);
+      tof_front_left_msg.field_of_view = 0.80f;
+      tof_front_left_msg.header.stamp.sec = sec;
+      tof_front_left_msg.header.stamp.nanosec = nsec;
+      fill_range(tof_front_right_msg, g_l8_front_r, 4.0f);
+      tof_front_right_msg.field_of_view = 0.80f;
+      tof_front_right_msg.header.stamp.sec = sec;
+      tof_front_right_msg.header.stamp.nanosec = nsec;
+      (void)rcl_publish(&tof_front_pub, &tof_front_msg, NULL);
+      (void)rcl_publish(&tof_front_left_pub, &tof_front_left_msg, NULL);
+      (void)rcl_publish(&tof_front_right_pub, &tof_front_right_msg, NULL);
+      (void)rcl_publish(&tof_l8_cols_pub, &tof_l8_cols_msg, NULL);
+      memcpy(tof_l8_grid_data, g_l8_grid_mm, sizeof(tof_l8_grid_data));
+      (void)rcl_publish(&tof_l8_grid_pub, &tof_l8_grid_msg, NULL);
+      stamp_from_ms(now, sec, nsec);
     }
-    fill_range(tof_front_msg, g_l8_front, 4.0f);
-    tof_front_msg.field_of_view = 0.80f;
-    tof_front_msg.header.stamp.sec = sec;
-    tof_front_msg.header.stamp.nanosec = nsec;
-    fill_range(tof_front_left_msg, g_l8_front_l, 4.0f);
-    tof_front_left_msg.field_of_view = 0.80f;
-    tof_front_left_msg.header.stamp.sec = sec;
-    tof_front_left_msg.header.stamp.nanosec = nsec;
-    fill_range(tof_front_right_msg, g_l8_front_r, 4.0f);
-    tof_front_right_msg.field_of_view = 0.80f;
-    tof_front_right_msg.header.stamp.sec = sec;
-    tof_front_right_msg.header.stamp.nanosec = nsec;
-    (void)rcl_publish(&tof_front_pub, &tof_front_msg, NULL);
-    (void)rcl_publish(&tof_front_left_pub, &tof_front_left_msg, NULL);
-    (void)rcl_publish(&tof_front_right_pub, &tof_front_right_msg, NULL);
-    (void)rcl_publish(&tof_l8_cols_pub, &tof_l8_cols_msg, NULL);
-    memcpy(tof_l8_grid_data, g_l8_grid_mm, sizeof(tof_l8_grid_data));
-    (void)rcl_publish(&tof_l8_grid_pub, &tof_l8_grid_msg, NULL);
   }
 
   if (g_sonar_ok) {
