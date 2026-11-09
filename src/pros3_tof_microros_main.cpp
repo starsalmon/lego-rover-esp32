@@ -166,6 +166,10 @@ uint16_t tof_l8_grid_data[64];
 rcl_publisher_t sonar_range_pub;
 // Pan servo on PCA9685 (bus_side) + combined status [sonar_m, servo_deg, pca_ok].
 rcl_publisher_t tof_status_pub;
+// /rover/tof/wifi: [rssi_dBm, antenna_ufl(0/1 readback), channel, wifi_disc, uros_up, uros_lost, txpower_dBm]
+rcl_publisher_t tof_wifi_pub;
+std_msgs__msg__Float32MultiArray tof_wifi_msg;
+float tof_wifi_data[7];
 std_msgs__msg__Float32MultiArray tof_status_msg;
 float tof_status_data[11];
 // L8 diag: frames read, poll errors, valid zones / zones with no target in last frame, most common target_status
@@ -231,11 +235,22 @@ void enable_ldo2() {
   Serial.printf("LDO2 GPIO%d HIGH\n", PIN_PROS3_LDO2);
 }
 
+int g_ant_readback = -1;
+
 void set_antenna_external(bool external) {
-  pinMode(PIN_PROS3_ANT_SEL, OUTPUT);
-  digitalWrite(PIN_PROS3_ANT_SEL, external ? HIGH : LOW);
-  Serial.printf("RF ant GPIO%d -> %s\n", PIN_PROS3_ANT_SEL,
-                external ? "u.FL external" : "onboard ceramic");
+  // As Jazz: INPUT_OUTPUT so the pad level reads back; hold latches it against glitches.
+  const gpio_num_t pin = (gpio_num_t)PIN_PROS3_ANT_SEL;
+  gpio_hold_dis(pin);
+  gpio_reset_pin(pin);
+  gpio_set_direction(pin, GPIO_MODE_INPUT_OUTPUT);
+  gpio_set_level(pin, external ? 1 : 0);
+  gpio_hold_en(pin);
+  g_ant_readback = gpio_get_level(pin);
+}
+
+void log_antenna() {
+  Serial.printf("RF ant GPIO%d -> %s (readback %d)\n", PIN_PROS3_ANT_SEL,
+                g_ant_readback == 1 ? "u.FL external" : "onboard ceramic", g_ant_readback);
 }
 
 
@@ -676,6 +691,16 @@ bool create_entities() {
   RCCHECK(rclc_publisher_init_default(
       &tof_status_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
       "rover/tof/status"));
+  RCCHECK(rclc_publisher_init_default(
+      &tof_wifi_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+      "rover/tof/wifi"));
+  tof_wifi_msg.layout.dim.data = nullptr;
+  tof_wifi_msg.layout.dim.size = 0;
+  tof_wifi_msg.layout.dim.capacity = 0;
+  tof_wifi_msg.layout.data_offset = 0;
+  tof_wifi_msg.data.data = tof_wifi_data;
+  tof_wifi_msg.data.size = 7;
+  tof_wifi_msg.data.capacity = 7;
   RCCHECK(rclc_subscription_init_default(
       &servo_angle_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
       "rover/servo/angle"));
@@ -740,6 +765,7 @@ void destroy_entities() {
   RCSOFTCHECK(rcl_publisher_fini(&tof_l8_grid_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&sonar_range_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&tof_status_pub, &node));
+  RCSOFTCHECK(rcl_publisher_fini(&tof_wifi_pub, &node));
   RCSOFTCHECK(rcl_subscription_fini(&servo_angle_sub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&ir_detected_pub, &node));
   RCSOFTCHECK(rcl_node_fini(&node));
@@ -784,16 +810,59 @@ void diag_wifi_events() {
 #endif
 }
 
+int32_t g_wifi_lock_ch = 0, g_wifi_lock_rssi = -127;
+uint8_t g_wifi_lock_bssid[6] = {0};
+
+void wifi_begin_locked() {
+  if (g_wifi_lock_ch) {
+    WiFi.begin(ROVER_WIFI_SSID, ROVER_WIFI_PASS, g_wifi_lock_ch, g_wifi_lock_bssid);
+  } else {
+    WiFi.begin(ROVER_WIFI_SSID, ROVER_WIFI_PASS);
+  }
+}
+
+// micro-ROS UDP transport without the library's extra WiFi.begin() (that re-associated,
+// dropped the BSSID lock and caused the reason=8 disconnect seen right after boot).
+void uros_set_transport_no_begin() {
+  static struct micro_ros_agent_locator locator;
+  locator.address = g_agent_ip;
+  locator.port = ROVER_AGENT_PORT;
+  rmw_uros_set_custom_transport(false, (void*)&locator, platformio_transport_open,
+                                platformio_transport_close, platformio_transport_write,
+                                platformio_transport_read);
+}
+
 void wifi_start() {
   g_agent_ip.fromString(ROVER_AGENT_IP);
   diag_wifi_events();
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(ROVER_HOSTNAME);
-  WiFi.setSleep(false);
-  WiFi.begin(ROVER_WIFI_SSID, ROVER_WIFI_PASS);
-#if ROVER_WIFI_DIAG
+  WiFi.setSleep(WIFI_PS_NONE);
   esp_wifi_set_ps(WIFI_PS_NONE);
+#if ROVER_WIFI_TXPOWER
+  WiFi.setTxPower((wifi_power_t)ROVER_WIFI_TXPOWER);
 #endif
+  WiFi.setAutoReconnect(true);
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+  // As Jazz/Beeper: lock to the strongest AP for our SSID from a boot scan.
+  {
+    const int n = WiFi.scanNetworks(false, false);
+    for (int i = 0; i < n; i++) {
+      if (WiFi.SSID(i) == ROVER_WIFI_SSID &&
+          (!g_wifi_lock_ch || WiFi.RSSI(i) > g_wifi_lock_rssi)) {
+        g_wifi_lock_ch = WiFi.channel(i);
+        g_wifi_lock_rssi = WiFi.RSSI(i);
+        memcpy(g_wifi_lock_bssid, WiFi.BSSID(i), 6);
+      }
+    }
+    Serial.printf("WiFi scan: %d APs, best match ch%ld %ld dBm %02X:%02X:%02X:%02X:%02X:%02X\n", n,
+                  (long)g_wifi_lock_ch, (long)g_wifi_lock_rssi, g_wifi_lock_bssid[0],
+                  g_wifi_lock_bssid[1], g_wifi_lock_bssid[2], g_wifi_lock_bssid[3],
+                  g_wifi_lock_bssid[4], g_wifi_lock_bssid[5]);
+    WiFi.scanDelete();
+  }
+  wifi_begin_locked();
 #if ROVER_WIFI_TXPOWER
   WiFi.setTxPower((wifi_power_t)ROVER_WIFI_TXPOWER);
 #endif
@@ -815,8 +884,7 @@ void wifi_start() {
   }
 #endif
   if (WiFi.status() == WL_CONNECTED) {
-    set_microros_wifi_transports(ROVER_WIFI_SSID, ROVER_WIFI_PASS, g_agent_ip,
-                                 ROVER_AGENT_PORT);
+    uros_set_transport_no_begin();
     uros_wifi_transport_ok = true;
     Serial.printf("WiFi %s IP=%s -> agent %s:%d\n", ROVER_HOSTNAME,
                   WiFi.localIP().toString().c_str(), ROVER_AGENT_IP, ROVER_AGENT_PORT);
@@ -955,6 +1023,8 @@ void publish_sensors(uint32_t now) {
 }  // namespace
 
 void setup() {
+  // RF switch first thing (as Jazz), before anything can touch the radio.
+  set_antenna_external(ROVER_PROS3_ANT_EXTERNAL != 0);
   Serial.begin(115200);
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
   Serial.setTxTimeoutMs(0);
@@ -972,7 +1042,7 @@ void setup() {
   }
 
   enable_ldo2();
-  set_antenna_external(ROVER_PROS3_ANT_EXTERNAL != 0);
+  log_antenna();
 #if ROVER_WIFI_FIRST
   wifi_start();
 #endif
@@ -1026,9 +1096,23 @@ void loop() {
     g_sonar_m = g_sonar.read_range_m();
   }
 
+  {
+    static uint32_t down_since = 0;
+    if (WiFi.status() == WL_CONNECTED) {
+      down_since = 0;
+    } else if (!down_since) {
+      down_since = now;
+    } else if (now - down_since > 15000UL) {
+      down_since = now;
+      Serial.println("WiFi down 15 s - reconnect to strongest AP");
+      g_wifi_lock_ch = 0;  // drop BSSID lock; ALL_CHANNEL_SCAN + sort by signal picks best
+      WiFi.disconnect(false);
+      wifi_begin_locked();
+    }
+  }
+
   if (!uros_wifi_transport_ok && WiFi.status() == WL_CONNECTED) {
-    set_microros_wifi_transports(ROVER_WIFI_SSID, ROVER_WIFI_PASS, g_agent_ip,
-                                 ROVER_AGENT_PORT);
+    uros_set_transport_no_begin();
     uros_wifi_transport_ok = true;
     Serial.printf("WiFi late OK IP=%s -> agent %s:%d\n",
                   WiFi.localIP().toString().c_str(), ROVER_AGENT_IP, ROVER_AGENT_PORT);
@@ -1064,6 +1148,18 @@ void loop() {
     const char* st = (ros_state == RosState::kConnected) ? "up"
                      : (ros_state == RosState::kWaitAgent) ? "wait"
                                                            : "link";
+    if (ros_state == RosState::kConnected && entities_ok) {
+      int8_t txq = 0;
+      esp_wifi_get_max_tx_power(&txq);
+      tof_wifi_data[0] = (WiFi.status() == WL_CONNECTED) ? (float)WiFi.RSSI() : -127.0f;
+      tof_wifi_data[1] = (float)g_ant_readback;
+      tof_wifi_data[2] = (float)WiFi.channel();
+      tof_wifi_data[3] = (float)g_diag_disc;
+      tof_wifi_data[4] = (float)g_diag_up;
+      tof_wifi_data[5] = (float)g_diag_lost;
+      tof_wifi_data[6] = txq / 4.0f;
+      RCSOFTCHECK(rcl_publish(&tof_wifi_pub, &tof_wifi_msg, NULL));
+    }
     Serial.printf("hb [%s] l8=%s front=%.2f sideL=%.2f sideR=%.2f sonar=%.2f\n",
                   st, g_l8_ok ? "ok" : "--", g_l8_front, g_side_l_m, g_side_r_m,
                   g_sonar_m);
