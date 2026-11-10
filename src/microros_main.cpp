@@ -2130,8 +2130,16 @@ void setup() {
   WiFi.setHostname("rover-esp");
   IPAddress rover_agent_ip;
   rover_agent_ip.fromString(ROVER_AGENT_IP);
+  // Strongest AP, not the first one found on the lowest channel (default FAST_SCAN); PS off and
+  // max TX before associating. (2026-11-10: T-Display at -70 dBm, 15% ping loss, 37 session drops.)
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(WIFI_PS_NONE);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
   set_microros_wifi_transports(ROVER_WIFI_SSID, ROVER_WIFI_PASS, rover_agent_ip, ROVER_AGENT_PORT);
   WiFi.setSleep(WIFI_PS_NONE);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
   Serial.printf("WiFi -> server agent %s:%d  ESP IP=%s\n", ROVER_AGENT_IP, ROVER_AGENT_PORT,
                 WiFi.localIP().toString().c_str());
   rover_diag_wifi_ready(reset_reason_str(esp_reset_reason()));
