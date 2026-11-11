@@ -4,5 +4,5 @@
 // HTTP handlers only queue commands.
 void audio_begin();                         // mount LittleFS, start audio task
 void audio_register(httpd_handle_t server); // /play /stop /volume /upload /sounds
-void audio_play_startup();                  // time-of-day greeting + optional battery, once
+void audio_play_startup();                  // no-op: NUC rover-boot-greet streams the greeting
 bool audio_is_playing();                    // speaker busy (whistle detector ignores the mic meanwhile)

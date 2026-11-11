@@ -76,6 +76,14 @@ static const MelodyDef kMelodies[] = {
     {{NOTE(Fs5, 16), NOTE(D5, 22)}, 2},
     // fleet_ping — bleep bloop ping when another bot's fleet IR ID is decoded
     {{NOTE(D5, 36), NOTE(Fs5, 36), NOTE(A5, 58)}, 3},
+    // boot chirp - earliest possible power-on pip
+    {{NOTE(C5, 40)}, 1},
+    // wifi - short rising
+    {{NOTE(A4, 50), NOTE(E5, 70)}, 2},
+    // agent - short, distinct from wifi
+    {{NOTE(D5, 45), NOTE(A5, 70)}, 2},
+    // hw ok - cheerful triad
+    {{NOTE(C5, 55), NOTE(E5, 55), NOTE(G5, 90)}, 3},
 };
 
 #undef NOTE
@@ -217,4 +225,26 @@ void RoverSpeaker::tick(uint32_t now_ms) {
   }
   _note_until_ms = now_ms + n.ms;
   _in_gap = true;
+}
+
+bool RoverSpeaker::busy() const { return _ok && _melody != nullptr; }
+
+void RoverSpeaker::play_error_code(uint8_t n) {
+  if (!_ok || n == 0) return;
+  if (n > 12) n = 12;
+  _vol = kVol;
+  uint8_t i = 0;
+  _custom[i++] = {E3, 90};
+  _custom[i++] = {0, 70};
+  _custom[i++] = {E3, 90};
+  _custom[i++] = {0, 180};
+  for (uint8_t k = 0; k < n && i + 1 < 30; k++) {
+    _custom[i++] = {G4, 45};
+    if (i < 30) _custom[i++] = {0, 90};
+  }
+  _melody = _custom;
+  _melody_len = i;
+  _note_idx = 0;
+  _in_gap = false;
+  _note_until_ms = 0;
 }

@@ -6,8 +6,31 @@
 #define SONAR_PAN_CENTER_DEG 90
 #endif
 
-bool RoverPeriph::begin(int speaker_pin, int ring_pin) {
+void RoverPeriph::start_speaker_task() {
+#if defined(ARDUINO_ARCH_ESP32)
+  if (_speaker_started && _speaker_task == nullptr) {
+    xTaskCreatePinnedToCore(&RoverPeriph::speaker_task, "rover_spk", 2048, this, 2, &_speaker_task,
+                            0);
+  }
+#endif
+}
+
+bool RoverPeriph::begin_speaker(int speaker_pin) {
+  if (_speaker_started) {
+    return true;
+  }
   const bool spk = _speaker.begin(speaker_pin);
+  _speaker_started = spk;
+  if (spk) {
+    Serial.printf("RoverPeriph speaker GPIO %d early\n", speaker_pin);
+    start_speaker_task();
+  }
+  return spk;
+}
+
+bool RoverPeriph::begin(int speaker_pin, int ring_pin) {
+  const bool spk = _speaker_started ? true : _speaker.begin(speaker_pin);
+  if (spk) _speaker_started = true;
   const bool ring = _ring.begin(ring_pin);
   for (uint8_t i = 0; i < ROVER_RING_COUNT; i++) {
     _sonar_bins[i] = 255;
@@ -30,9 +53,8 @@ bool RoverPeriph::begin(int speaker_pin, int ring_pin) {
   // Speaker timing must not depend on the main loop cadence.
   // If the loop stalls (WiFi, I2C, display), tones get “dragged out”.
   // Run a tiny task to tick the speaker at a steady rate.
-  if (spk && _speaker_task == nullptr) {
-    xTaskCreatePinnedToCore(&RoverPeriph::speaker_task, "rover_spk", 2048, this, 2, &_speaker_task,
-                            0);
+  if (spk) {
+    start_speaker_task();
   }
 #endif
 
@@ -53,6 +75,8 @@ void RoverPeriph::tick(uint32_t now_ms) {
 
 void RoverPeriph::play(uint8_t melody_id) { _speaker.play(melody_id); }
 void RoverPeriph::play_code(uint32_t code) { _speaker.play_code(code); }
+void RoverPeriph::play_error_code(uint8_t n) { _speaker.play_error_code(n); }
+bool RoverPeriph::speaker_busy() const { return _speaker.busy(); }
 
 void RoverPeriph::ring_mode(uint8_t mode_id) { _ring.set_mode(mode_id); }
 

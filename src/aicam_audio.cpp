@@ -368,10 +368,7 @@ void greeting_task(void *) {
 // does not stall the camera HTTP loop. Clips are Piper en_GB-alan-medium,
 // same voice as rover-speech.
 void audio_play_startup() {
-  static bool started = false;
-  if (started || !g_fs_ok) return;
-  started = true;
-  xTaskCreatePinnedToCore(greeting_task, "greet", 8192, nullptr, 2, nullptr, 0);
+  // Boot greeting is spoken by the NUC rover-boot-greet service via GET /play?url=.
 }
 
 

@@ -25,3 +25,33 @@ Diagnostics: `/rover/drive_diag` (drive board, 1 Hz).
 - `WIRING.md` — pins for both boards
 - `../lego-rover-ros2/ROVER_BEHAVIOR.md` — explore behaviour
 - `../c3-mini-bot/docs/SWARM.md` — fleet
+
+## T-Display boot beeps
+
+The passive buzzer (GPIO 17) plays a short non-blocking diagnostic sequence at boot (LEDC, speaker task ? it never stalls drive or micro-ROS).
+
+Order:
+
+1. **Power-on chirp** ? one short pip as early as possible in `setup()`, before the rest of the hardware init.
+2. **Wi-Fi connected** (optional, short rising pair) once the station has an IP.
+3. **Agent link** (optional, short pair) when the micro-ROS session comes up.
+4. **Hardware OK** ? a cheerful three-note triad, as soon as every device below looks healthy.
+5. **Hardware error** ? if anything is still missing after ~15 s: a low double beep, then **N** short beeps for each failed device (250 ms between codes).
+
+### Error code table (N short beeps)
+
+| N | Device | How it is judged |
+|---|--------|------------------|
+| 1 | IMU (MPU6050) on the T-Display | `mpu.ok()` |
+| 2 | Encoders on the T-Display | MCP23017 body / MCP IR OK |
+| 3 | VL53L8CX front (Pro S3) | Recent `/rover/tof/l8_cols` or L8 frames in `/rover/tof/status` |
+| 4 | Side VL53 left (Pro S3) | Recent `/rover/tof/left` (or a valid range latched this boot) |
+| 5 | Side VL53 right (Pro S3) | Recent `/rover/tof/right` (or a valid range latched this boot) |
+| 6 | Rear sonar (Pro S3) | `/rover/tof/status[0]` > 0 with a fresh status |
+| 7 | PCA9685 pan servo (Pro S3) | `/rover/tof/status[2]` ? 0.5 with a fresh status |
+| 8 | micro-ROS agent | No agent session / no path to the Pro S3 status topics |
+
+The sequence is also logged as `boot_beep ...` on serial and via `rover_diag_event` (see `/rover/drive_diag` / telem).
+
+The spoken ?Hi, good morning/afternoon/evening?? greeting is **not** on the buzzer. The NUC `rover-boot-greet` service synthesises it with Piper (same Alan voice as rover-speech) and streams it to the AI cam with `GET /play?url=`.
+

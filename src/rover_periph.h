@@ -16,10 +16,13 @@
 class RoverPeriph {
  public:
   bool begin(int speaker_pin = PIN_ROVER_SPEAKER, int ring_pin = PIN_ROVER_RING);
+  bool begin_speaker(int speaker_pin = PIN_ROVER_SPEAKER);
   void tick(uint32_t now_ms);
 
   void play(uint8_t melody_id);
   void play_code(uint32_t code);
+  void play_error_code(uint8_t n);
+  bool speaker_busy() const;
   void ring_mode(uint8_t mode_id);
   void notify_bump();
   void notify_stall();
@@ -48,6 +51,10 @@ class RoverPeriph {
   static constexpr uint8_t kMelodyMenuDone = RoverSpeaker::kMelodyMenuDone;
   static constexpr uint8_t kMelodySonarPing = RoverSpeaker::kMelodySonarPing;
   static constexpr uint8_t kMelodyFleetPing = RoverSpeaker::kMelodyFleetPing;
+  static constexpr uint8_t kMelodyBootChirp = RoverSpeaker::kMelodyBootChirp;
+  static constexpr uint8_t kMelodyWifiOk = RoverSpeaker::kMelodyWifiOk;
+  static constexpr uint8_t kMelodyAgentOk = RoverSpeaker::kMelodyAgentOk;
+  static constexpr uint8_t kMelodyHwOk = RoverSpeaker::kMelodyHwOk;
   static constexpr uint8_t kRingStandby = RoverRing::kModeStandby;
   static constexpr uint8_t kRingReady = RoverRing::kModeReady;
   static constexpr uint8_t kRingAuto = RoverRing::kModeAuto;
@@ -60,6 +67,7 @@ class RoverPeriph {
   static int rear_pan_to_led(float pan_deg);
 
   RoverSpeaker _speaker;
+  bool _speaker_started = false;
   RoverRing _ring;
   uint8_t _sonar_bins[ROVER_RING_COUNT];
   uint8_t _ir_bins[ROVER_RING_COUNT];
@@ -79,6 +87,7 @@ class RoverPeriph {
   void paint_rear(uint32_t now_ms, uint8_t* frame);
 
 #if defined(ARDUINO_ARCH_ESP32)
+  void start_speaker_task();
   static void speaker_task(void* arg);
   TaskHandle_t _speaker_task = nullptr;
 #endif

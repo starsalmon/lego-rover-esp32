@@ -67,6 +67,7 @@ static void IRAM_ATTR direct_right_isr() { direct_right_ticks++; }
 #endif
 #if defined(ROVER_PERIPH)
 #include "rover_periph.h"
+#include "rover_boot_beep.h"
 #endif
 #endif
 
@@ -122,6 +123,10 @@ static volatile bool ring_status_pending = false;
 static std_msgs__msg__Float32MultiArray ring_status_msg;
 static float ring_status_buf[16];
 static uint32_t ring_l8_rx = 0, ring_side_rx = 0, ring_l8_last_ms = 0;
+static bool ring_pca_ok = false;
+static float ring_l8_frames = 0;
+static uint32_t ring_tl_last_ms = 0, ring_tr_last_ms = 0;
+static bool ring_tl_valid = false, ring_tr_valid = false;
 #endif
 #if defined(ROVER_SONAR)
 static rcl_subscription_t sonar_cal_sweep_sub;
@@ -256,7 +261,7 @@ static RoverVl53 side_tof;
 static RoverVl53L8 front_tof;
 #endif
 #if defined(ROVER_PERIPH)
-static RoverPeriph rover_periph;
+RoverPeriph rover_periph;
 static void on_speaker(const void *msgin) {
 #if defined(ROVER_PERIPH)
   rover_periph.play_code(((const std_msgs__msg__UInt32 *)msgin)->data);
@@ -475,6 +480,8 @@ void on_servo_angle(const void *msgin) {
     ring_servo_deg = (m->data.size >= 3 && m->data.data[2] < 0.5f) ? -1.0f : m->data.data[1];
     ring_status_ms = millis();
     ring_status_pending = true;
+    if (m->data.size >= 3) ring_pca_ok = m->data.data[2] >= 0.5f;
+    if (m->data.size >= 7) ring_l8_frames = m->data.data[6];
   }
   return;
 #endif
@@ -535,12 +542,16 @@ static void on_ring_l8(const void *msgin) {
 static void on_ring_tl(const void *msgin) {
   const auto *m = static_cast<const sensor_msgs__msg__Range *>(msgin);
   ring_side_l = (m->range > 0.0f && m->range < m->max_range) ? m->range : -1.0f;
+  ring_tl_last_ms = millis();
+  if (ring_side_l > 0.0f) ring_tl_valid = true;
   ring_side_pending = true;
   ring_side_rx++;
 }
 static void on_ring_tr(const void *msgin) {
   const auto *m = static_cast<const sensor_msgs__msg__Range *>(msgin);
   ring_side_r = (m->range > 0.0f && m->range < m->max_range) ? m->range : -1.0f;
+  ring_tr_last_ms = millis();
+  if (ring_side_r > 0.0f) ring_tr_valid = true;
   ring_side_pending = true;
   ring_side_rx++;
 }
@@ -1409,6 +1420,7 @@ static void handle_ros_state() {
       if (!periph_ready_played) {
         periph_ready_played = true;
         rover_periph.notify_ready();
+        rover_boot_beep_note_agent();
       }
 #endif
 #if defined(ROVER_VL53L)
@@ -1881,6 +1893,10 @@ static void tof_pub_task(void *param) {
 void setup() {
   rover_board_power_on();
   SmoothDrive::gpio_safe_idle(DIR_L, PWM_L, DIR_R, PWM_R);
+#if defined(ROVER_PERIPH)
+  rover_periph.begin_speaker(PIN_ROVER_SPEAKER);
+  rover_boot_beep_start();
+#endif
 
   Serial.begin(115200);
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
@@ -2143,6 +2159,9 @@ void setup() {
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
   Serial.printf("WiFi -> server agent %s:%d  ESP IP=%s\n", ROVER_AGENT_IP, ROVER_AGENT_PORT,
                 WiFi.localIP().toString().c_str());
+#if defined(ROVER_PERIPH)
+  rover_boot_beep_note_wifi();
+#endif
   rover_batt_http_begin();
   rover_diag_wifi_ready(reset_reason_str(esp_reset_reason()));
 #ifdef ROVER_TDISPLAY_S3
@@ -2508,6 +2527,31 @@ void loop() {
 #endif
   rover_periph.tick_distance_ring(now);
 #endif
+#endif
+
+#if defined(ROVER_PERIPH)
+  {
+    const bool enc_ok =
+#if defined(ROVER_MCP_IR)
+        mcp_ir.body_ok() || mcp_ir.ok();
+#else
+        true;
+#endif
+    rover_boot_beep_set_local(mpu.ok(), enc_ok);
+#if defined(RING_REMOTE_TOF)
+    const uint32_t now_beep = now;
+    const bool st_fresh = ring_status_ms && (now_beep - ring_status_ms) < 3000;
+    const bool l8_ok = (ring_l8_last_ms && (now_beep - ring_l8_last_ms) < 3000) || ring_l8_frames > 0;
+    const bool sonar_ok = st_fresh && ring_sonar_m > 0.0f;
+    const bool pca_ok = st_fresh && ring_pca_ok;
+    const bool tl_ok = ring_tl_valid || (ring_tl_last_ms && (now_beep - ring_tl_last_ms) < 3000);
+    const bool tr_ok = ring_tr_valid || (ring_tr_last_ms && (now_beep - ring_tr_last_ms) < 3000);
+    rover_boot_beep_set_remote(st_fresh, pca_ok, sonar_ok, l8_ok, tl_ok, tr_ok, entities_ok);
+#else
+    rover_boot_beep_set_remote(false, false, false, false, false, false, entities_ok);
+#endif
+    rover_boot_beep_tick(now);
+  }
 #endif
 
   update_status_led(now);
