@@ -164,14 +164,14 @@ rcl_publisher_t tof_l8_grid_pub;
 std_msgs__msg__UInt16MultiArray tof_l8_grid_msg;
 uint16_t tof_l8_grid_data[64];
 rcl_publisher_t sonar_range_pub;
-// Pan servo on PCA9685 (bus_side) + combined status [sonar_m, servo_deg, pca_ok].
+// Pan servo on PCA9685 (bus_side) + status [sonar_m, servo_deg, pca_ok, ir..., l8..., sonar_ok, l8_ok, side_l_ok, side_r_ok].
 rcl_publisher_t tof_status_pub;
 // /rover/tof/wifi: [rssi_dBm, antenna_ufl(0/1 readback), channel, wifi_disc, uros_up, uros_lost, txpower_dBm]
 rcl_publisher_t tof_wifi_pub;
 std_msgs__msg__Float32MultiArray tof_wifi_msg;
 float tof_wifi_data[7];
 std_msgs__msg__Float32MultiArray tof_status_msg;
-float tof_status_data[11];
+float tof_status_data[16];
 // L8 diag: frames read, poll errors, valid zones / zones with no target in last frame, most common target_status
 uint32_t g_l8_frames = 0, g_l8_poll_err = 0;
 uint8_t g_l8_valid_z = 0, g_l8_notgt_z = 0, g_l8_top_status = 255;
@@ -709,8 +709,8 @@ bool create_entities() {
   tof_status_msg.layout.dim.capacity = 0;
   tof_status_msg.layout.data_offset = 0;
   tof_status_msg.data.data = tof_status_data;
-  tof_status_msg.data.size = 11;
-  tof_status_msg.data.capacity = 6;
+  tof_status_msg.data.size = 15;
+  tof_status_msg.data.capacity = 16;
   RCCHECK(rclc_publisher_init_default(
       &ir_detected_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
       "rover/tof/ir_rx_edges"));
@@ -1014,6 +1014,12 @@ void publish_sensors(uint32_t now) {
   tof_status_data[8] = static_cast<float>(g_l8_valid_z);
   tof_status_data[9] = static_cast<float>(g_l8_notgt_z);
   tof_status_data[10] = static_cast<float>(g_l8_top_status);
+  // [11..14] device health (1=init/present, 0=missing or init failed).
+  // Range of -1 / no-target is still healthy.
+  tof_status_data[11] = g_sonar_ok ? 1.0f : 0.0f;
+  tof_status_data[12] = g_l8_ok ? 1.0f : 0.0f;
+  tof_status_data[13] = g_side_l_ok ? 1.0f : 0.0f;
+  tof_status_data[14] = g_side_r_ok ? 1.0f : 0.0f;
   (void)rcl_publish(&tof_status_pub, &tof_status_msg, NULL);
 
   ir_detected_msg.data = static_cast<int32_t>(g_ir_rx_edges);

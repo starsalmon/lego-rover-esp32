@@ -43,13 +43,15 @@ Order:
 | N | Device | How it is judged |
 |---|--------|------------------|
 | 1 | IMU (MPU6050) on the T-Display | `mpu.ok()` |
-| 2 | Encoders on the T-Display | MCP23017 body / MCP IR OK |
-| 3 | VL53L8CX front (Pro S3) | Recent `/rover/tof/l8_cols` or L8 frames in `/rover/tof/status` |
-| 4 | Side VL53 left (Pro S3) | Recent `/rover/tof/left` (or a valid range latched this boot) |
-| 5 | Side VL53 right (Pro S3) | Recent `/rover/tof/right` (or a valid range latched this boot) |
-| 6 | Rear sonar (Pro S3) | `/rover/tof/status[0]` > 0 with a fresh status |
+| 2 | Wheel-tick encoders on the T-Display | GPIO ISRs on the tick pins were attached. The MCP IR expander is optional and `mcp=0` in drive_diag is not an encoder fault. |
+| 3 | VL53L8CX front (Pro S3) | Device init flag in `/rover/tof/status[12]`, or recent `/rover/tof/l8_cols`. No-target is healthy. |
+| 4 | Side VL53 left (Pro S3) | Init flag `[13]` or a recent `/rover/tof/left` message (any range, including out of range). |
+| 5 | Side VL53 right (Pro S3) | Init flag `[14]` or a recent `/rover/tof/right` message. |
+| 6 | Rear sonar (Pro S3) | Init flag `/rover/tof/status[11]`. A range of -1 / no echo is healthy. |
 | 7 | PCA9685 pan servo (Pro S3) | `/rover/tof/status[2]` ? 0.5 with a fresh status |
 | 8 | micro-ROS agent | No agent session / no path to the Pro S3 status topics |
+
+A sensor that is present but has nothing in range (ToF no-target, sonar no echo) is treated as healthy. Only a missing device, I2C NACK, or init failure is an error.
 
 The sequence is also logged as `boot_beep ...` on serial and via `rover_diag_event` (see `/rover/drive_diag` / telem).
 

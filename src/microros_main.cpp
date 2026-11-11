@@ -34,6 +34,7 @@
 
 // TEST: wheel sensors direct on the sonar pins. Ring and sonar stay off.
 static volatile uint32_t direct_left_ticks = 0;
+static bool g_encoder_isr_ok = false;
 static volatile uint32_t direct_right_ticks = 0;
 static void IRAM_ATTR direct_left_isr() { direct_left_ticks++; }
 static void IRAM_ATTR direct_right_isr() { direct_right_ticks++; }
@@ -127,6 +128,9 @@ static bool ring_pca_ok = false;
 static float ring_l8_frames = 0;
 static uint32_t ring_tl_last_ms = 0, ring_tr_last_ms = 0;
 static bool ring_tl_valid = false, ring_tr_valid = false;
+static bool ring_health_flags = false;
+static bool ring_sonar_dev_ok = false, ring_l8_dev_ok = false;
+static bool ring_tl_dev_ok = false, ring_tr_dev_ok = false;
 #endif
 #if defined(ROVER_SONAR)
 static rcl_subscription_t sonar_cal_sweep_sub;
@@ -482,6 +486,13 @@ void on_servo_angle(const void *msgin) {
     ring_status_pending = true;
     if (m->data.size >= 3) ring_pca_ok = m->data.data[2] >= 0.5f;
     if (m->data.size >= 7) ring_l8_frames = m->data.data[6];
+    if (m->data.size >= 15) {
+      ring_sonar_dev_ok = m->data.data[11] >= 0.5f;
+      ring_l8_dev_ok = m->data.data[12] >= 0.5f;
+      ring_tl_dev_ok = m->data.data[13] >= 0.5f;
+      ring_tr_dev_ok = m->data.data[14] >= 0.5f;
+      ring_health_flags = true;
+    }
   }
   return;
 #endif
@@ -543,7 +554,7 @@ static void on_ring_tl(const void *msgin) {
   const auto *m = static_cast<const sensor_msgs__msg__Range *>(msgin);
   ring_side_l = (m->range > 0.0f && m->range < m->max_range) ? m->range : -1.0f;
   ring_tl_last_ms = millis();
-  if (ring_side_l > 0.0f) ring_tl_valid = true;
+  ring_tl_valid = true;  // a published Range is enough; no-target / out of range is healthy
   ring_side_pending = true;
   ring_side_rx++;
 }
@@ -551,7 +562,7 @@ static void on_ring_tr(const void *msgin) {
   const auto *m = static_cast<const sensor_msgs__msg__Range *>(msgin);
   ring_side_r = (m->range > 0.0f && m->range < m->max_range) ? m->range : -1.0f;
   ring_tr_last_ms = millis();
-  if (ring_side_r > 0.0f) ring_tr_valid = true;
+  ring_tr_valid = true;
   ring_side_pending = true;
   ring_side_rx++;
 }
@@ -2074,6 +2085,7 @@ void setup() {
   pinMode(SONAR_ECHO_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(SONAR_TRIG_PIN), direct_left_isr, RISING);
   attachInterrupt(digitalPinToInterrupt(SONAR_ECHO_PIN), direct_right_isr, RISING);
+  g_encoder_isr_ok = true;
   Serial.printf("TEST ticks L GPIO %d R GPIO %d\n", SONAR_TRIG_PIN, SONAR_ECHO_PIN);
 #endif
 #endif
@@ -2531,21 +2543,20 @@ void loop() {
 
 #if defined(ROVER_PERIPH)
   {
-    const bool enc_ok =
-#if defined(ROVER_MCP_IR)
-        mcp_ir.body_ok() || mcp_ir.ok();
-#else
-        true;
-#endif
-    rover_boot_beep_set_local(mpu.ok(), enc_ok);
+    // Encoders are the GPIO tick ISRs, not the MCP expander (MCP may be absent).
+    rover_boot_beep_set_local(mpu.ok(), g_encoder_isr_ok);
 #if defined(RING_REMOTE_TOF)
     const uint32_t now_beep = now;
     const bool st_fresh = ring_status_ms && (now_beep - ring_status_ms) < 3000;
-    const bool l8_ok = (ring_l8_last_ms && (now_beep - ring_l8_last_ms) < 3000) || ring_l8_frames > 0;
-    const bool sonar_ok = st_fresh && ring_sonar_m > 0.0f;
+    // Presence only: a recent topic or Pro S3 init flag. No-target / out of range is OK.
+    const bool l8_ok = ring_health_flags ? ring_l8_dev_ok
+        : ((ring_l8_last_ms && (now_beep - ring_l8_last_ms) < 3000) || ring_l8_frames > 0);
+    const bool sonar_ok = ring_health_flags ? ring_sonar_dev_ok : st_fresh;
     const bool pca_ok = st_fresh && ring_pca_ok;
-    const bool tl_ok = ring_tl_valid || (ring_tl_last_ms && (now_beep - ring_tl_last_ms) < 3000);
-    const bool tr_ok = ring_tr_valid || (ring_tr_last_ms && (now_beep - ring_tr_last_ms) < 3000);
+    const bool tl_ok = ring_health_flags ? ring_tl_dev_ok
+        : (ring_tl_valid || (ring_tl_last_ms && (now_beep - ring_tl_last_ms) < 3000));
+    const bool tr_ok = ring_health_flags ? ring_tr_dev_ok
+        : (ring_tr_valid || (ring_tr_last_ms && (now_beep - ring_tr_last_ms) < 3000));
     rover_boot_beep_set_remote(st_fresh, pca_ok, sonar_ok, l8_ok, tl_ok, tr_ok, entities_ok);
 #else
     rover_boot_beep_set_remote(false, false, false, false, false, false, entities_ok);
