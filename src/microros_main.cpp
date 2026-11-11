@@ -40,6 +40,7 @@ static void IRAM_ATTR direct_right_isr() { direct_right_ticks++; }
 
 #ifdef ROVER_TDISPLAY_S3
 #include "battery.h"
+#include "rover_batt_http.h"
 #include "estop.h"
 #include "rover_button_events.h"
 #include "rover_go_button.h"
@@ -2142,6 +2143,7 @@ void setup() {
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
   Serial.printf("WiFi -> server agent %s:%d  ESP IP=%s\n", ROVER_AGENT_IP, ROVER_AGENT_PORT,
                 WiFi.localIP().toString().c_str());
+  rover_batt_http_begin();
   rover_diag_wifi_ready(reset_reason_str(esp_reset_reason()));
 #ifdef ROVER_TDISPLAY_S3
   ota.beginConnected("rover-esp");
@@ -2156,6 +2158,7 @@ void setup() {
 }
 
 void loop() {
+  rover_batt_http_tick(battery.voltage());
   const uint32_t now = millis();
   static uint32_t prev = now;
   const float dt = (now - prev) / 1000.0f;

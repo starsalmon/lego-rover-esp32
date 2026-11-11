@@ -10,6 +10,9 @@
 #include <Arduino.h>
 #include <Audio.h>
 #include <LittleFS.h>
+#include <HTTPClient.h>
+#include <WiFi.h>
+#include <time.h>
 
 #include "rover_pins_aicam.h"
 
@@ -29,6 +32,48 @@ volatile bool g_playing = false;
 volatile int g_volume = 12;
 char g_now[200] = "";
 
+constexpr int kPlayMax = 12;
+char g_play[kPlayMax][32];
+volatile int g_play_n = 0;
+volatile int g_play_i = 0;
+uint32_t g_play_gap_until = 0;
+bool g_clip_seen = false;
+
+bool start_file(const char *path) {
+  if (!g_audio || !path || !path[0]) return false;
+  g_audio->stopSong();
+  g_audio->connecttoFS(LittleFS, path);
+  strlcpy(g_now, path, sizeof(g_now));
+  g_playing = true;
+  g_clip_seen = false;
+  return true;
+}
+
+void playlist_advance() {
+  if (g_play_i >= g_play_n) return;
+  const uint32_t now = millis();
+  if (g_play_gap_until == 0) {
+    g_play_gap_until = now + 60;
+    return;
+  }
+  if (now < g_play_gap_until) return;
+  g_play_gap_until = 0;
+  const int i = g_play_i;
+  g_play_i = i + 1;
+  start_file(g_play[i]);
+}
+
+bool playlist_start(const char names[][32], int n) {
+  if (n <= 0) return false;
+  if (n > kPlayMax) n = kPlayMax;
+  g_play_n = n;
+  g_play_i = 1;
+  g_play_gap_until = 0;
+  for (int i = 0; i < n; i++) strlcpy(g_play[i], names[i], sizeof(g_play[i]));
+  return start_file(g_play[0]);
+}
+
+
 void audio_task(void *) {
   g_audio = new Audio(false, 3, I2S_NUM_1);  // I2S0 is the only PDM-RX port on the S3: the whistle mic has it
   g_audio->setPinout(AICAM_SPK_I2S_BCLK, AICAM_SPK_I2S_LRC, AICAM_SPK_I2S_DOUT);
@@ -44,9 +89,20 @@ void audio_task(void *) {
       }
     }
     g_audio->loop();
-    g_playing = g_audio->isRunning();
-    if (!g_playing) g_now[0] = 0;
-    vTaskDelay(g_playing ? 1 : 10);
+    const bool running = g_audio->isRunning();
+    if (running) {
+      g_clip_seen = true;
+      g_playing = true;
+    } else if (g_clip_seen) {
+      // Clip actually finished (not just "not started yet").
+      g_clip_seen = false;
+      g_playing = false;
+      g_now[0] = 0;
+      playlist_advance();
+    } else {
+      g_playing = false;
+    }
+    vTaskDelay(running || g_play_i < g_play_n ? 1 : 10);
   }
 }
 
@@ -197,23 +253,145 @@ void audio_begin() {
   g_fs_ok = LittleFS.begin(true);  // format on first boot if the partition is blank
   Serial.printf("[audio] LittleFS %s total %u used %u\n", g_fs_ok ? "ok" : "FAIL",
                 g_fs_ok ? LittleFS.totalBytes() : 0, g_fs_ok ? LittleFS.usedBytes() : 0);
-  g_q = xQueueCreate(4, sizeof(Cmd));
+  g_q = xQueueCreate(6, sizeof(Cmd));
   // Core 0 (camera grab + MJPEG tasks are pinned to core 1), below Wi-Fi priority.
   xTaskCreatePinnedToCore(audio_task, "audio", 8192, nullptr, 3, nullptr, 0);
 }
 
-// Boot tune: play /startup.mp3 once (called after Wi-Fi is up). Silent if missing.
-void audio_play_startup() {
-  static bool done = false;
-  if (done || !g_fs_ok) return;
-  done = true;
-  char path[64];
-  if (find_file("startup.mp3", path, sizeof(path))) {
-    Serial.printf("[audio] startup tune %s\n", path);
-    send(CMD_FILE, path);
-  } else {
-    Serial.println("[audio] no startup.mp3 on LittleFS");
+// Melbourne time for the greeting. POSIX TZ: AEST UTC+10, AEDT UTC+11,
+// DST starts first Sunday of October, ends first Sunday of April at 03:00.
+static const char *kTzMelbourne = "AEST-10AEDT,M10.1.0,M4.1.0/3";
+
+bool wait_for_local_time(struct tm *out, uint32_t budget_ms) {
+  setenv("TZ", kTzMelbourne, 1);
+  tzset();
+  configTzTime(kTzMelbourne, "pool.ntp.org", "time.cloudflare.com", "time.google.com");
+  const uint32_t start = millis();
+  while (millis() - start < budget_ms) {
+    if (getLocalTime(out, 200) && out->tm_year >= (2024 - 1900)) {
+      return true;
+    }
   }
+  return false;
+}
+
+int fetch_battery_percent(uint32_t budget_ms) {
+  const char *urls[] = {
+      "http://rover-esp.lan/battery",
+      "http://rover-esp.local/battery",
+      "http://192.168.3.71/battery",
+  };
+  const uint32_t start = millis();
+  int url_i = 0;
+  while (millis() - start < budget_ms) {
+    HTTPClient http;
+    http.setConnectTimeout(800);
+    http.setTimeout(800);
+    if (!http.begin(urls[url_i % 3])) {
+      url_i++;
+      delay(150);
+      continue;
+    }
+    const int code = http.GET();
+    String body = (code > 0) ? http.getString() : String();
+    http.end();
+    if (code == 200) {
+      int p = -1;
+      int idx = body.indexOf("\"percent\"");
+      if (idx >= 0) {
+        idx = body.indexOf(':', idx);
+        if (idx >= 0) p = body.substring(idx + 1).toInt();
+      } else {
+        p = body.toInt();
+      }
+      if (p >= 0 && p <= 100) return p;
+    }
+    url_i++;
+    delay(200);
+  }
+  return -1;
+}
+
+void append_number_clips(char names[][32], int &n, int pct) {
+  auto add = [&](const char *stem) {
+    char path[64];
+    if (n >= kPlayMax) return;
+    if (find_file(stem, path, sizeof(path))) {
+      strlcpy(names[n++], path, 32);
+    } else {
+      Serial.printf("[audio] missing clip %s\n", stem);
+    }
+  };
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  if (pct <= 19 || pct == 100) {
+    char stem[8];
+    snprintf(stem, sizeof(stem), "n%d", pct);
+    add(stem);
+    return;
+  }
+  const int tens = (pct / 10) * 10;
+  const int units = pct % 10;
+  char stem[8];
+  snprintf(stem, sizeof(stem), "n%d", tens);
+  add(stem);
+  if (units) {
+    snprintf(stem, sizeof(stem), "n%d", units);
+    add(stem);
+  }
+}
+
+void greeting_task(void *) {
+  struct tm tinfo = {};
+  const bool got_time = wait_for_local_time(&tinfo, 4000);
+  const int pct = fetch_battery_percent(5000);
+
+  const char *greet = "hello";
+  if (got_time) {
+    const int hm = tinfo.tm_hour * 60 + tinfo.tm_min;
+    if (hm >= 5 * 60 && hm < 12 * 60) greet = "morning";
+    else if (hm >= 12 * 60 && hm < 18 * 60) greet = "afternoon";
+    else greet = "evening";
+    Serial.printf("[audio] local %02d:%02d greeting=%s battery=%d\n", tinfo.tm_hour,
+                  tinfo.tm_min, greet, pct);
+  } else {
+    Serial.printf("[audio] no NTP, fallback hello, battery=%d\n", pct);
+  }
+
+  char names[kPlayMax][32];
+  int n = 0;
+  auto add = [&](const char *stem) {
+    char path[64];
+    if (n >= kPlayMax) return;
+    if (find_file(stem, path, sizeof(path))) {
+      strlcpy(names[n++], path, 32);
+    } else {
+      Serial.printf("[audio] missing clip %s\n", stem);
+    }
+  };
+  add("hi");
+  add(greet);
+  add("im_rover");
+  if (pct >= 0) {
+    add("my_battery_is");
+    append_number_clips(names, n, pct);
+    add("percent");
+  }
+  if (n == 0) {
+    Serial.println("[audio] no greeting clips on LittleFS");
+  } else {
+    playlist_start(names, n);
+  }
+  vTaskDelete(nullptr);
+}
+
+// Spoken boot greeting (after Wi-Fi is up). Own task so NTP / battery wait
+// does not stall the camera HTTP loop.
+void audio_play_startup() {
+  static bool started = false;
+  if (started || !g_fs_ok) return;
+  started = true;
+  xTaskCreatePinnedToCore(greeting_task, "greet", 8192, nullptr, 2, nullptr, 0);
 }
 
 bool audio_is_playing() { return g_playing; }

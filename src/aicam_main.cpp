@@ -562,7 +562,7 @@ esp_err_t h_index(httpd_req_t *req) {
                      "<html><body><h3>" ROVER_CAM_HOSTNAME "</h3>"
                      "<p><a href=/capture>/capture</a> | <a href=/status>/status</a> | "
                      "stream on :81/stream | /control?var=..&val=.. | /ir?on=0|1 | "
-                     "<a href=/sounds>/sounds</a> | /play?file=chime | /stop | /volume?v=0-21 | <a href=/whistle>/whistle</a></p>"
+                     "<a href=/sounds>/sounds</a> | /play?file=hi | /stop | /volume?v=0-21 | <a href=/whistle>/whistle</a></p>"
                      "<img id=s style='max-width:100%'><script>"
                      "s.src=location.protocol+'//'+location.hostname+':81/stream'</script>"
                      "</body></html>");

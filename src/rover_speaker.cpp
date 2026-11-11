@@ -50,30 +50,17 @@ enum : uint16_t {
   A5 = 880,
 };
 
-// Kernkraft 400 hook from Cain's MIDI (140 BPM, 4/4, PPQ 384).
-// Every melody note is an 8th (192 ticks ≈ 214 ms), not a 16th.
-// Sounding 209 ms + kNoteGapMs 5 ≈ 214 ms so pitch changes still speak.
-// The twist is G–F#–D–E (not G–F#–E–D). hz 0 = rest.
-constexpr uint16_t kE8 = 209;   // eighth @ 140 BPM
-constexpr uint16_t kQ = 424;    // quarter
-constexpr uint16_t kH = 854;    // half (the hole after the pickup)
-
+// Startup voice greeting lives on the AI cam. These buzzer cues are short
+// pips only; the previous hook melody is gone.
 static const MelodyDef kMelodies[] = {
     {},  // 0 unused
-    // ready — pickup, 2-beat hole, then the hook (startup connect cue)
-    {{NOTE(B4, kE8), NOTE(D5, kE8), NOTE(E5, kE8), NOTE(Fs5, kE8), NOTE(0, kH), NOTE(B4, kE8),
-      NOTE(D5, kE8), NOTE(E5, kE8), NOTE(Fs5, kE8), NOTE(G5, kE8), NOTE(Fs5, kE8), NOTE(D5, kE8),
-      NOTE(E5, kE8), NOTE(D5, kE8), NOTE(Fs5, kE8), NOTE(B4, kQ)},
-     16},
-    // auto start — just the hook
-    {{NOTE(B4, kE8), NOTE(D5, kE8), NOTE(E5, kE8), NOTE(Fs5, kE8), NOTE(G5, kE8), NOTE(Fs5, kE8),
-      NOTE(D5, kE8), NOTE(E5, kQ)},
-     8},
-    // auto stop — reverse the hook
-    {{NOTE(E5, kE8), NOTE(D5, kE8), NOTE(Fs5, kE8), NOTE(G5, kE8), NOTE(Fs5, kE8), NOTE(E5, kE8),
-      NOTE(D5, kE8), NOTE(B4, kQ)},
-     8},
-    // bump — restore original “thunk thunk”
+    // ready - two quiet rising pips (off unless ROVER_READY_TUNE=1)
+    {{NOTE(E4, 80), NOTE(A4, 120)}, 2},
+    // auto start - short up
+    {{NOTE(A4, 70), NOTE(D5, 110)}, 2},
+    // auto stop - short down
+    {{NOTE(D5, 70), NOTE(A4, 110)}, 2},
+        // bump — restore original “thunk thunk”
     {{NOTE(A3, 55), NOTE(A3, 55), NOTE(E3, 62)}, 3},
     // stall — restore original “stuck”
     {{NOTE(G3, 62), NOTE(F4, 44), NOTE(D4, 62)}, 3},
