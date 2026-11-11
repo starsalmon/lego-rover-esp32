@@ -93,14 +93,24 @@ void audio_task(void *) {
     if (running) {
       g_clip_seen = true;
       g_playing = true;
-    } else if (g_clip_seen) {
-      // Clip actually finished (not just "not started yet").
-      g_clip_seen = false;
-      g_playing = false;
-      g_now[0] = 0;
-      playlist_advance();
     } else {
       g_playing = false;
+      if (g_clip_seen) {
+        // Clip actually finished (not just "not started yet").
+        // Start the inter-clip gap; do not start the next file in this
+        // same tick, or a still-false isRunning could skip ahead.
+        g_clip_seen = false;
+        g_now[0] = 0;
+        if (g_play_i < g_play_n) {
+          g_play_gap_until = millis() + 60;
+        }
+      } else if (g_play_i < g_play_n && g_play_gap_until != 0 &&
+                 millis() >= g_play_gap_until) {
+        g_play_gap_until = 0;
+        const int i = g_play_i;
+        g_play_i = i + 1;
+        start_file(g_play[i]);
+      }
     }
     vTaskDelay(running || g_play_i < g_play_n ? 1 : 10);
   }
