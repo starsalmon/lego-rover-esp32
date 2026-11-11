@@ -53,7 +53,7 @@ void playlist_advance() {
   if (g_play_i >= g_play_n) return;
   const uint32_t now = millis();
   if (g_play_gap_until == 0) {
-    g_play_gap_until = now + 60;
+    g_play_gap_until = now + 200;
     return;
   }
   if (now < g_play_gap_until) return;
@@ -102,7 +102,7 @@ void audio_task(void *) {
         g_clip_seen = false;
         g_now[0] = 0;
         if (g_play_i < g_play_n) {
-          g_play_gap_until = millis() + 60;
+          g_play_gap_until = millis() + 200;
         }
       } else if (g_play_i < g_play_n && g_play_gap_until != 0 &&
                  millis() >= g_play_gap_until) {
@@ -322,50 +322,21 @@ int fetch_battery_percent(uint32_t budget_ms) {
   return -1;
 }
 
-void append_number_clips(char names[][32], int &n, int pct) {
-  auto add = [&](const char *stem) {
-    char path[64];
-    if (n >= kPlayMax) return;
-    if (find_file(stem, path, sizeof(path))) {
-      strlcpy(names[n++], path, 32);
-    } else {
-      Serial.printf("[audio] missing clip %s\n", stem);
-    }
-  };
-  if (pct < 0) pct = 0;
-  if (pct > 100) pct = 100;
-  if (pct <= 19 || pct == 100) {
-    char stem[8];
-    snprintf(stem, sizeof(stem), "n%d", pct);
-    add(stem);
-    return;
-  }
-  const int tens = (pct / 10) * 10;
-  const int units = pct % 10;
-  char stem[8];
-  snprintf(stem, sizeof(stem), "n%d", tens);
-  add(stem);
-  if (units) {
-    snprintf(stem, sizeof(stem), "n%d", units);
-    add(stem);
-  }
-}
-
 void greeting_task(void *) {
   struct tm tinfo = {};
   const bool got_time = wait_for_local_time(&tinfo, 4000);
   const int pct = fetch_battery_percent(5000);
 
-  const char *greet = "hello";
+  const char *greet = "hello_rover";
   if (got_time) {
     const int hm = tinfo.tm_hour * 60 + tinfo.tm_min;
-    if (hm >= 5 * 60 && hm < 12 * 60) greet = "morning";
-    else if (hm >= 12 * 60 && hm < 18 * 60) greet = "afternoon";
-    else greet = "evening";
+    if (hm >= 5 * 60 && hm < 12 * 60) greet = "hi_morning";
+    else if (hm >= 12 * 60 && hm < 18 * 60) greet = "hi_afternoon";
+    else greet = "hi_evening";
     Serial.printf("[audio] local %02d:%02d greeting=%s battery=%d\n", tinfo.tm_hour,
                   tinfo.tm_min, greet, pct);
   } else {
-    Serial.printf("[audio] no NTP, fallback hello, battery=%d\n", pct);
+    Serial.printf("[audio] no NTP, fallback hello_rover, battery=%d\n", pct);
   }
 
   char names[kPlayMax][32];
@@ -379,13 +350,11 @@ void greeting_task(void *) {
       Serial.printf("[audio] missing clip %s\n", stem);
     }
   };
-  add("hi");
   add(greet);
-  add("im_rover");
-  if (pct >= 0) {
-    add("my_battery_is");
-    append_number_clips(names, n, pct);
-    add("percent");
+  if (pct >= 0 && pct <= 100) {
+    char stem[16];
+    snprintf(stem, sizeof(stem), "batt_%d", pct);
+    add(stem);
   }
   if (n == 0) {
     Serial.println("[audio] no greeting clips on LittleFS");
@@ -396,13 +365,15 @@ void greeting_task(void *) {
 }
 
 // Spoken boot greeting (after Wi-Fi is up). Own task so NTP / battery wait
-// does not stall the camera HTTP loop.
+// does not stall the camera HTTP loop. Clips are Piper en_GB-alan-medium,
+// same voice as rover-speech.
 void audio_play_startup() {
   static bool started = false;
   if (started || !g_fs_ok) return;
   started = true;
   xTaskCreatePinnedToCore(greeting_task, "greet", 8192, nullptr, 2, nullptr, 0);
 }
+
 
 bool audio_is_playing() { return g_playing; }
 
