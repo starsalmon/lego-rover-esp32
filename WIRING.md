@@ -132,7 +132,7 @@ ZH1.5 pin 1 Tx is 3.3 V UART into GPIO 15. Do not put the lidar's 5 V on a GPIO.
 | **3 GND** | GND | Common with the ESP |
 | **4 P5V** | Solid **5 V** rail | About 290 mA. Not 3V3 |
 
-`/rover/scan` is `sensor_msgs/LaserScan`, frame_id **`lidar_link`**, at the spin rate (~10 Hz). 0 rad is the lidar's forward (sensor 0° / +X). The device angle increases clockwise; the firmware mirrors it so positive scan angles are counter-clockwise (REP-103). `angle_min` is −π, 500 bins at 0.72°, `range_min` 0.03 m, `range_max` 12 m. No return, out-of-window, and empty bins are NaN, not 0. Intensities are the device confidence, 0–255. A `base_link` → `lidar_link` mount transform belongs on the brain; this board does not know the bracket pose.
+`/rover/scan` is `sensor_msgs/LaserScan`, frame_id **`lidar_link`**, at the spin rate (~10 Hz). 0 rad is the lidar's forward (sensor 0° / +X). The device angle increases clockwise; the firmware mirrors it so positive scan angles are counter-clockwise (REP-103). `angle_min` is −π, 500 bins at 0.72°, `range_min` 0.03 m, `range_max` 12 m. No return, out-of-window, and empty bins are NaN, not 0. Intensities are the device confidence, 0–255. The scan is published on every loop iteration a new revolution is ready, including the ToF tick (ToF goes out first). The XRCE custom-transport MTU is 1400 bytes so the ~4 KB scan is three reliable fragments; WiFiUDP splits a datagram at 1460 bytes, so the MTU stays under that. A `base_link` → `lidar_link` mount transform belongs on the brain; this board does not know the bracket pose.
 
 `/rover/tof/status` stays 16 floats. `[15]` is 1 only when a CRC-valid lidar frame arrived in the last second. The T-Display subscribes to this topic with a 16-float static buffer, so bring-up counters are a separate topic, `/rover/tof/lidar`:
 
@@ -147,8 +147,10 @@ ZH1.5 pin 1 Tx is 3.3 V UART into GPIO 15. Do not put the lidar's 5 V on a GPIO.
 | 6 | UART FIFO overflow and RX ring full, cumulative |
 | 7 | Revolutions closed, cumulative. This is what becomes `/rover/scan` |
 | 8 | Points held in the revolution that has not closed yet |
+| 9 | `rcl_publish` of `/rover/scan` that returned OK, cumulative |
+| 10 | `rcl_publish` of `/rover/scan` that failed, cumulative |
 
-`[0]=0` means the UART never started. `[0]=1` and `[1]=0` means GPIO 15 is quiet. `[1]` near 20000 with `[2]=0` and `[4]` climbing means bytes arrive but headers are rejected. `[3]` climbing with `[2]=0` means headers are seen and CRC is failing. `[2]` climbing with `[7]=0` means valid packets never complete a revolution (`[8]` is the open count). `[5]` climbing is a bad stop-bit (baud or signal). `[6]` climbing means the parser is not draining the UART.
+`[0]=0` means the UART never started. `[0]=1` and `[1]=0` means GPIO 15 is quiet. `[1]` near 20000 with `[2]=0` and `[4]` climbing means bytes arrive but headers are rejected. `[3]` climbing with `[2]=0` means headers are seen and CRC is failing. `[2]` climbing with `[7]=0` means valid packets never complete a revolution (`[8]` is the open count). `[7]` climbing with `[9]` climbing is a scan leaving the board; `[10]` climbing means `rcl_publish` rejected it. `[5]` climbing is a bad stop-bit (baud or signal). `[6]` climbing means the parser is not draining the UART.
 
 ---
 

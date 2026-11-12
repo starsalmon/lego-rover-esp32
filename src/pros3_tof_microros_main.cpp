@@ -203,9 +203,13 @@ char scan_frame_id[] = "lidar_link";
 // [6] UART FIFO overflow + ring-buffer full, cumulative
 // [7] revolutions closed (LaserScan candidates), cumulative
 // [8] points in the revolution that has not closed yet
+// [9] rcl_publish(/rover/scan) successes, cumulative
+// [10] rcl_publish(/rover/scan) failures, cumulative
 rcl_publisher_t lidar_diag_pub;
 std_msgs__msg__Float32MultiArray lidar_diag_msg;
-float lidar_diag_data[9];
+float lidar_diag_data[11];
+uint32_t lidar_scan_pub_ok = 0;
+uint32_t lidar_scan_pub_fail = 0;
 
 sensor_msgs__msg__Range tof_left_msg;
 sensor_msgs__msg__Range tof_right_msg;
@@ -765,8 +769,8 @@ bool create_entities() {
   lidar_diag_msg.layout.dim.capacity = 0;
   lidar_diag_msg.layout.data_offset = 0;
   lidar_diag_msg.data.data = lidar_diag_data;
-  lidar_diag_msg.data.size = 9;
-  lidar_diag_msg.data.capacity = 9;
+  lidar_diag_msg.data.size = 11;
+  lidar_diag_msg.data.capacity = 11;
   memset(lidar_diag_data, 0, sizeof(lidar_diag_data));
 
   fill_range(tof_left_msg, -1.0f, 1.3f);
@@ -1090,15 +1094,19 @@ void publish_sensors(uint32_t now) {
   lidar_diag_data[6] = static_cast<float>(rover_lidar_overflows());
   lidar_diag_data[7] = static_cast<float>(rover_lidar_scans());
   lidar_diag_data[8] = static_cast<float>(rover_lidar_open_points());
+  lidar_diag_data[9] = static_cast<float>(lidar_scan_pub_ok);
+  lidar_diag_data[10] = static_cast<float>(lidar_scan_pub_fail);
   (void)rcl_publish(&lidar_diag_pub, &lidar_diag_msg, NULL);
 
   ir_detected_msg.data = static_cast<int32_t>(g_ir_rx_edges);
   (void)rcl_publish(&ir_detected_pub, &ir_detected_msg, NULL);
 }
 
-// Not called on the same iteration as publish_sensors(). A scan occupies most
-// of the XRCE reliable stream until the agent ACKs, and that stream is shared
-// with the ToF publishers.
+// Called every loop iteration, including sensor ticks. Gating it on the
+// non-sensor branch meant a loop that spent >=100 ms in publish_sensors()
+// (eleven reliable confirms) never reached this function, so closed
+// revolutions stayed on the board while /rover/scan stayed quiet.
+// ToF is published first on a sensor tick; this runs after that.
 void publish_lidar_scan(uint32_t now) {
   if (ros_state != RosState::kConnected || !entities_ok) {
     return;
@@ -1109,6 +1117,9 @@ void publish_lidar_scan(uint32_t now) {
   if (!rover_lidar_copy_scan(&scan, &seq) || seq == last_seq) {
     return;
   }
+  // Advance even when publish fails. Retrying the same scan every 5 ms would
+  // sit in the 50 ms reliable timeout and stall ToF. The next revolution is
+  // ~100 ms later.
   last_seq = seq;
   memcpy(scan_ranges, scan.ranges, sizeof(scan_ranges));
   memcpy(scan_intensities, scan.intensities, sizeof(scan_intensities));
@@ -1121,7 +1132,11 @@ void publish_lidar_scan(uint32_t now) {
   scan_msg.range_max = scan.range_max;
   scan_msg.header.stamp.sec = static_cast<int32_t>(now / 1000);
   scan_msg.header.stamp.nanosec = static_cast<uint32_t>((now % 1000) * 1000000UL);
-  (void)rcl_publish(&scan_pub, &scan_msg, NULL);
+  if (rcl_publish(&scan_pub, &scan_msg, NULL) == RCL_RET_OK) {
+    lidar_scan_pub_ok++;
+  } else {
+    lidar_scan_pub_fail++;
+  }
 }
 
 }  // namespace
@@ -1237,9 +1252,8 @@ void loop() {
   if (sensor_tick) {
     last_pub_ms = now;
     publish_sensors(now);
-  } else {
-    publish_lidar_scan(now);
   }
+  publish_lidar_scan(now);
 
 #if defined(ENABLE_OTA)
   g_ota.tick();

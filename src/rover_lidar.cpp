@@ -200,5 +200,12 @@ float rover_lidar_hz() { return g_hz; }
 
 bool rover_lidar_recent(uint32_t now_ms, uint32_t window_ms) {
   const uint32_t last = g_last_packet_ms;
-  return last != 0 && (now_ms - last) <= window_ms;
+  if (last == 0) {
+    return false;
+  }
+  // The UART task writes millis() continuously. `now_ms` is often sampled at
+  // the start of the main loop, so last can be a few milliseconds ahead of it.
+  // An unsigned subtraction then wraps and looks older than any window.
+  const int32_t age = static_cast<int32_t>(now_ms - last);
+  return age <= static_cast<int32_t>(window_ms);
 }
