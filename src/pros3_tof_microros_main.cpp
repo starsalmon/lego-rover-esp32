@@ -191,6 +191,21 @@ sensor_msgs__msg__LaserScan scan_msg;
 float scan_ranges[stl19p::kScanBins];
 float scan_intensities[stl19p::kScanBins];
 char scan_frame_id[] = "lidar_link";
+// /rover/tof/lidar — bring-up counters. Not appended to /rover/tof/status:
+// the T-Display subscribes to status with a 16-float static buffer, and a
+// longer message would realloc that pointer.
+// [0] UART task started (1/0)
+// [1] bytes from uart_read_bytes over the last closed 1 s window
+// [2] CRC-valid packets, cumulative
+// [3] CRC errors, cumulative
+// [4] resyncs (bad VerLen or failed CRC), cumulative
+// [5] UART frame + parity errors, cumulative
+// [6] UART FIFO overflow + ring-buffer full, cumulative
+// [7] revolutions closed (LaserScan candidates), cumulative
+// [8] points in the revolution that has not closed yet
+rcl_publisher_t lidar_diag_pub;
+std_msgs__msg__Float32MultiArray lidar_diag_msg;
+float lidar_diag_data[9];
 
 sensor_msgs__msg__Range tof_left_msg;
 sensor_msgs__msg__Range tof_right_msg;
@@ -741,6 +756,18 @@ bool create_entities() {
     scan_ranges[i] = std::numeric_limits<float>::quiet_NaN();
     scan_intensities[i] = std::numeric_limits<float>::quiet_NaN();
   }
+  RCCHECK(rclc_publisher_init_default(
+      &lidar_diag_pub, &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+      "rover/tof/lidar"));
+  lidar_diag_msg.layout.dim.data = nullptr;
+  lidar_diag_msg.layout.dim.size = 0;
+  lidar_diag_msg.layout.dim.capacity = 0;
+  lidar_diag_msg.layout.data_offset = 0;
+  lidar_diag_msg.data.data = lidar_diag_data;
+  lidar_diag_msg.data.size = 9;
+  lidar_diag_msg.data.capacity = 9;
+  memset(lidar_diag_data, 0, sizeof(lidar_diag_data));
 
   fill_range(tof_left_msg, -1.0f, 1.3f);
   tof_right_msg = tof_left_msg;
@@ -796,6 +823,7 @@ void destroy_entities() {
   RCSOFTCHECK(rcl_subscription_fini(&servo_angle_sub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&ir_detected_pub, &node));
   RCSOFTCHECK(rcl_publisher_fini(&scan_pub, &node));
+  RCSOFTCHECK(rcl_publisher_fini(&lidar_diag_pub, &node));
   RCSOFTCHECK(rcl_node_fini(&node));
   rclc_support_fini(&support);
   entities_ok = false;
@@ -1049,8 +1077,20 @@ void publish_sensors(uint32_t now) {
   tof_status_data[13] = g_side_l_ok ? 1.0f : 0.0f;
   tof_status_data[14] = g_side_r_ok ? 1.0f : 0.0f;
   // [15] STL-19P frames arriving (1 = a CRC-valid packet in the last second).
+  // Bring-up detail that does not fit in this 16-float message is /rover/tof/lidar.
   tof_status_data[15] = rover_lidar_recent(now, 1000) ? 1.0f : 0.0f;
   (void)rcl_publish(&tof_status_pub, &tof_status_msg, NULL);
+
+  lidar_diag_data[0] = rover_lidar_started() ? 1.0f : 0.0f;
+  lidar_diag_data[1] = static_cast<float>(rover_lidar_bytes_last_sec());
+  lidar_diag_data[2] = static_cast<float>(rover_lidar_packets());
+  lidar_diag_data[3] = static_cast<float>(rover_lidar_crc_errors());
+  lidar_diag_data[4] = static_cast<float>(rover_lidar_resyncs());
+  lidar_diag_data[5] = static_cast<float>(rover_lidar_frame_errors());
+  lidar_diag_data[6] = static_cast<float>(rover_lidar_overflows());
+  lidar_diag_data[7] = static_cast<float>(rover_lidar_scans());
+  lidar_diag_data[8] = static_cast<float>(rover_lidar_open_points());
+  (void)rcl_publish(&lidar_diag_pub, &lidar_diag_msg, NULL);
 
   ir_detected_msg.data = static_cast<int32_t>(g_ir_rx_edges);
   (void)rcl_publish(&ir_detected_pub, &ir_detected_msg, NULL);
@@ -1230,11 +1270,18 @@ void loop() {
       RCSOFTCHECK(rcl_publish(&tof_wifi_pub, &tof_wifi_msg, NULL));
     }
     Serial.printf("hb [%s] l8=%s front=%.2f sideL=%.2f sideR=%.2f sonar=%.2f "
-                  "scan=%.1fHz pkt=%lu crc=%lu\n",
+                  "lidar up=%d B/s=%lu pkt=%lu crc=%lu resync=%lu frm=%lu ovf=%lu "
+                  "scans=%lu open=%lu\n",
                   st, g_l8_ok ? "ok" : "--", g_l8_front, g_side_l_m, g_side_r_m, g_sonar_m,
-                  rover_lidar_started() ? rover_lidar_hz() : 0.0f,
+                  rover_lidar_started() ? 1 : 0,
+                  static_cast<unsigned long>(rover_lidar_bytes_last_sec()),
                   static_cast<unsigned long>(rover_lidar_packets()),
-                  static_cast<unsigned long>(rover_lidar_crc_errors()));
+                  static_cast<unsigned long>(rover_lidar_crc_errors()),
+                  static_cast<unsigned long>(rover_lidar_resyncs()),
+                  static_cast<unsigned long>(rover_lidar_frame_errors()),
+                  static_cast<unsigned long>(rover_lidar_overflows()),
+                  static_cast<unsigned long>(rover_lidar_scans()),
+                  static_cast<unsigned long>(rover_lidar_open_points()));
 #if ROVER_WIFI_DIAG
     if (WiFi.status() == WL_CONNECTED) {
       const int r = WiFi.RSSI();

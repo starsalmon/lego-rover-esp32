@@ -191,7 +191,7 @@ void ScanAssembler::publish(const Packet& pkt, Scan* out) {
   out->angle_max = static_cast<float>(-kPi + (kScanBins - 1) * inc);
   out->range_min = kRangeMinM;
   out->range_max = kRangeMaxM;
-  out->points = points_;
+  out->points = points_ > 0xffffu ? 0xffffu : static_cast<uint16_t>(points_);
 
   uint16_t returns = 0;
   for (int i = 0; i < kScanBins; i++) {

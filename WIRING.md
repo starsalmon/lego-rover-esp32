@@ -119,7 +119,7 @@ Divider is on **motor VM** (after the main pack switch); readings are meaningles
 | **15** | STL-19P / Waveshare D500 UART RX (lidar Tx, 3.3 V only) |
 | **11** | RF switch, HIGH = u.FL (`ROVER_PROS3_ANT_EXTERNAL=1`) |
 
-u.FL antenna. Publishes `/rover/tof/front`, `front_left`, `front_right`, `l8_cols`, `left`, `right`, `/rover/sonar/range`, and `/rover/scan`.
+u.FL antenna. Publishes `/rover/tof/front`, `front_left`, `front_right`, `l8_cols`, `left`, `right`, `/rover/sonar/range`, `/rover/scan`, and `/rover/tof/lidar`.
 
 ## STL-19P lidar (Waveshare D500)
 
@@ -132,7 +132,23 @@ ZH1.5 pin 1 Tx is 3.3 V UART into GPIO 15. Do not put the lidar's 5 V on a GPIO.
 | **3 GND** | GND | Common with the ESP |
 | **4 P5V** | Solid **5 V** rail | About 290 mA. Not 3V3 |
 
-`/rover/scan` is `sensor_msgs/LaserScan`, frame_id **`lidar_link`**, at the spin rate (~10 Hz). 0 rad is the lidar's forward (sensor 0° / +X). The device angle increases clockwise; the firmware mirrors it so positive scan angles are counter-clockwise (REP-103). `angle_min` is −π, 500 bins at 0.72°, `range_min` 0.03 m, `range_max` 12 m. No return, out-of-window, and empty bins are NaN, not 0. Intensities are the device confidence, 0–255. `/rover/tof/status[15]` is 1 while frames are arriving. A `base_link` → `lidar_link` mount transform belongs on the brain; this board does not know the bracket pose.
+`/rover/scan` is `sensor_msgs/LaserScan`, frame_id **`lidar_link`**, at the spin rate (~10 Hz). 0 rad is the lidar's forward (sensor 0° / +X). The device angle increases clockwise; the firmware mirrors it so positive scan angles are counter-clockwise (REP-103). `angle_min` is −π, 500 bins at 0.72°, `range_min` 0.03 m, `range_max` 12 m. No return, out-of-window, and empty bins are NaN, not 0. Intensities are the device confidence, 0–255. A `base_link` → `lidar_link` mount transform belongs on the brain; this board does not know the bracket pose.
+
+`/rover/tof/status` stays 16 floats. `[15]` is 1 only when a CRC-valid lidar frame arrived in the last second. The T-Display subscribes to this topic with a 16-float static buffer, so bring-up counters are a separate topic, `/rover/tof/lidar`:
+
+| Index | Meaning |
+|-------|---------|
+| 0 | UART task started (1) or `rover_lidar_begin` failed (0) |
+| 1 | Bytes returned by `uart_read_bytes` in the last closed 1 s window. A spinning lidar is roughly 20000 |
+| 2 | CRC-valid packets, cumulative |
+| 3 | CRC errors, cumulative |
+| 4 | Resyncs (VerLen was not `0x2C`, or a CRC failed), cumulative |
+| 5 | UART frame and parity errors, cumulative |
+| 6 | UART FIFO overflow and RX ring full, cumulative |
+| 7 | Revolutions closed, cumulative. This is what becomes `/rover/scan` |
+| 8 | Points held in the revolution that has not closed yet |
+
+`[0]=0` means the UART never started. `[0]=1` and `[1]=0` means GPIO 15 is quiet. `[1]` near 20000 with `[2]=0` and `[4]` climbing means bytes arrive but headers are rejected. `[3]` climbing with `[2]=0` means headers are seen and CRC is failing. `[2]` climbing with `[7]=0` means valid packets never complete a revolution (`[8]` is the open count). `[5]` climbing is a bad stop-bit (baud or signal). `[6]` climbing means the parser is not draining the UART.
 
 ---
 

@@ -89,6 +89,9 @@ class ScanAssembler {
   // returns true. The point that crossed the seam starts the next revolution.
   bool add(const Packet& pkt, Scan* out);
 
+  // Points buffered in the revolution that has not closed yet.
+  uint32_t open_points() const { return points_; }
+
  private:
   void clear_bins();
   void publish(const Packet& pkt, Scan* out);
@@ -97,7 +100,7 @@ class ScanAssembler {
   float intensities_[kScanBins];
   float prev_deg_;
   uint16_t rev_start_ms_;
-  uint16_t points_;
+  uint32_t points_;
   bool have_prev_;
   bool have_start_;
 };
