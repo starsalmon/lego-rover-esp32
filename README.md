@@ -3,7 +3,7 @@
 Rover is dual-board, both thin WiFi micro-ROS clients of the brain:
 
 - **T-Display-S3 drive board** (`rover-esp`, .71) — motors, MPU6050 IMU, wheel ticks, LED ring, speaker, Go/E-stop, display, local safety. Env `s3_tdisplay_microros_rover_drive` (`src/microros_main.cpp`).
-- **Pro S3 ToF board** (`rover-tof`) — VL53L8CX front, VL53L0X sides, PCA9685. Env `um_pros3_tof_microros` (`src/pros3_tof_microros_main.cpp`).
+- **Pro S3 ToF board** (`rover-tof`) — VL53L8CX front, VL53L0X sides, PCA9685, STL-19P lidar on `/rover/scan` (`lidar_link`). Env `um_pros3_tof_microros` (`src/pros3_tof_microros_main.cpp`).
 
 **Brain:** NUC `brain` (192.168.3.172) runs `rover-brain` in Docker under `/data/swarm/robot-fleet` (ROS 2 Jazzy), micro-ROS agent on UDP 8888.
 

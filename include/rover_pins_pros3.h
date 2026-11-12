@@ -102,7 +102,14 @@
 #define IR_TX_LEDC_CHANNEL 4
 #endif
 
-// Spares for later: 15, 16, 34–37
+// STL-19P / Waveshare D500 lidar. UART1 RX only — the lidar transmits, the ESP
+// does not. PWM is wired to GND (internal 10 Hz); do not drive GPIO 16 unless
+// that wire is moved off ground for external speed control.
+#ifndef LIDAR_RX_PIN
+#define LIDAR_RX_PIN 15
+#endif
+
+// GPIO 16 reserved for optional lidar motor PWM. 34–37 still spare.
 // Avoid: 0, 3, 10, 17 (LDO2), 18 (RGB), 19/20 (USB), 33 (VBUS), 45, 46
 
 #ifndef ROVER_HOSTNAME
