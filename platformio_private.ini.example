@@ -5,6 +5,6 @@
 build_flags =
   -DROVER_WIFI_SSID=\"YourSSID\"
   -DROVER_WIFI_PASS=\"YourPassword\"
-  -DROVER_TELEM_HOST=\"192.168.2.31\"
+  -DROVER_TELEM_HOST=\"192.168.3.172\"
   ; optional OTA upload password:
   ; -DROVER_OTA_PASS=\"rover\"

@@ -53,20 +53,7 @@
 #define ROVER_RING_ZERO_BEARING 270.0f
 #endif
 
-// Pi UART (legacy serial micro-ROS only — not used on WiFi rover).
-#ifndef PI_UART_PORT
-#define PI_UART_PORT 1
-#define PI_UART_RX 17
-#define PI_UART_TX 18
-#endif
-#ifndef PI_UART_BAUD
-#define PI_UART_BAUD 460800
-#endif
-#ifndef PI_PERIPH_BAUD
-#define PI_PERIPH_BAUD 115200
-#endif
-
-// Body MCP23008 @ 0x21 (A0 → 3.3 V). Wheel IR + ToF enables.
+// Optional body MCP23008 @ 0x21 (A0 → 3.3 V). Wheel encoders use direct GPIO 11/12 when fitted.
 #ifndef MCP_BODY_ADDR
 #define MCP_BODY_ADDR 0x21
 #endif
@@ -175,7 +162,7 @@
 #define SONAR_REVERSE_M 0.08f
 #endif
 
-// HC-SR04 on pan bracket (header GPIO11/12).
+// Wheel tick inputs reuse these pin defines (GPIO 11 / 12 on the drive board).
 #ifndef SONAR_TRIG_PIN
 #define SONAR_TRIG_PIN 11
 #endif
@@ -250,7 +237,7 @@
 #define ROVER_BOOT_PAN_SWEEP 0
 #endif
 #ifndef ROVER_TELEM_HOST
-#define ROVER_TELEM_HOST "192.168.2.31"
+#define ROVER_TELEM_HOST "192.168.3.172"
 #endif
 #ifndef ROVER_TELEM_PORT
 #define ROVER_TELEM_PORT 4243

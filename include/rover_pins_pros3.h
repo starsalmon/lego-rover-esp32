@@ -13,8 +13,6 @@
 #endif
 
 // ProS3[D] RF switch = GPIO11 (UM SeriesD helper RF_SWITCH): LOW=onboard ceramic, HIGH=external u.FL.
-// GPIO37 (used before 2026-11-10) is NOT the RF switch, so the board never left the onboard antenna.
-// Same pin/level as Jazz (starsalmon/jazz 3ac7e7e).
 #ifndef PIN_PROS3_ANT_SEL
 #define PIN_PROS3_ANT_SEL 11
 #endif

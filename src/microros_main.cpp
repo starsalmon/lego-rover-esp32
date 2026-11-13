@@ -2150,7 +2150,7 @@ void setup() {
 
 #if defined(ROVER_MICROROS_WIFI)
 #ifndef ROVER_AGENT_IP
-#define ROVER_AGENT_IP "192.168.2.31"
+#define ROVER_AGENT_IP "192.168.3.172"
 #endif
 #ifndef ROVER_AGENT_PORT
 #define ROVER_AGENT_PORT 8888
