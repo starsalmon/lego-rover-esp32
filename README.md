@@ -31,7 +31,11 @@ See `WIRING.md` → Flash. Turn `allow_drive` OFF before OTA. Wi-Fi in gitignore
 3. Tap **Go** (or `/rover/button` true) → brain session → explore publishes `/cmd_vel`.
 4. Drive board enforces E-stop, stall lockout, and cmd timeout.
 
-Diagnostics: `/rover/drive_diag` (drive, 1 Hz).
+Diagnostics: `/rover/drive_diag` (drive, 1 Hz); `bssid=` / `roams=` show the associated AP and app roam count. Pro S3 `/rover/tof/wifi` adds `bssid` last octet and roam count as elements 7–8.
+
+### Wi-Fi roaming (same SSID, multiple APs)
+
+Both ROS nodes use shared `wifi_roam` (`src/wifi_roam.cpp`): `wifi_sta_config_t` rm/btm (802.11k/v) where the SDK exposes those fields (Arduino-ESP32 3.2 / IDF 4.4 here), plus a non-blocking scan every 10 s when RSSI &lt; −70 dBm. If another BSSID is ≥ 8 dB stronger, reconnect directly (min 30 s between roams). Power save stays off; TX power unchanged. Serial logs each roam with old/new RSSI and BSSID.
 
 ## T-Display boot beeps
 
