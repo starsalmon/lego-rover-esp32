@@ -41,7 +41,7 @@ Both ROS nodes use shared `wifi_roam` (`src/wifi_roam.cpp`): `wifi_sta_config_t`
 
 Passive buzzer on GPIO 17 plays a short non-blocking sequence at boot (LEDC speaker task).
 
-Order: power chirp → Wi-Fi (optional) → agent (optional) → hardware OK triad → or error codes (low double + N short beeps).
+Order: power chirp → Wi-Fi (optional) → agent (optional) → hardware OK triad → or error codes (low double + N short beeps). Error codes play only after grace: **20 s** for local I2C/IMU/encoders, **45 s** for micro-ROS agent and Pro S3 ToF topics (`ROVER_BOOT_BEEP_LOCAL_GRACE_MS` / `ROVER_BOOT_BEEP_NETWORK_GRACE_MS`). Pro S3 RGB LED uses the same 45 s window before “no agent” styling.
 
 | N | Device | Health check |
 |---|--------|----------------|

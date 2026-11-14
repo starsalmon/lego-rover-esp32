@@ -29,6 +29,7 @@ class Pros3StatusLed {
   int _pin = -1;
   Pros3StatusLedInput _in;
   uint32_t _boot_until = 0;
+  uint32_t _network_grace_until = 0;
   bool _ready = false;
   Phase _last_phase = Phase::kBoot;
   bool _last_on = false;

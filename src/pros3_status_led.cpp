@@ -1,5 +1,7 @@
 #include "pros3_status_led.h"
 
+#include "rover_boot_beep.h"
+
 #ifndef PIN_PROS3_RGB_LED
 #define PIN_PROS3_RGB_LED 18
 #endif
@@ -27,7 +29,9 @@ void Pros3StatusLed::begin(int pin) {
   g_px->clear();
   g_px->show();
   _show(36, 36, 36);
-  _boot_until = millis() + 350;
+  const uint32_t now = millis();
+  _boot_until = now + 350;
+  _network_grace_until = now + ROVER_BOOT_BEEP_NETWORK_GRACE_MS;
   _ready = true;
 }
 
@@ -35,14 +39,18 @@ Pros3StatusLed::Phase Pros3StatusLed::_phase(uint32_t now_ms) const {
   if (now_ms < _boot_until) {
     return Phase::kBoot;
   }
+  const bool net_grace = now_ms < _network_grace_until;
   if (!_in.wifi_connected || !_in.uros_transport) {
     return Phase::kWifiConnecting;
   }
   if (_in.agent_connected) {
     return Phase::kAgentOk;
   }
-  if (_in.agent_reconnecting) {
+  if (_in.agent_reconnecting && !net_grace) {
     return Phase::kAgentLost;
+  }
+  if (net_grace) {
+    return Phase::kWifiConnecting;
   }
   return Phase::kWifiNoAgent;
 }

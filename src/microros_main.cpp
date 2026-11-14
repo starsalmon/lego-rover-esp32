@@ -1498,6 +1498,14 @@ static void update_status_led(uint32_t now_ms) {
   const bool moving =
       cmd_fresh && (fabsf(last_lin) > 0.03f || fabsf(last_ang) > 0.03f);
 
+#if defined(ROVER_PERIPH)
+  if (!mpu.ok() && rover_boot_beep_local_grace_over(now_ms)) {
+    status_led.set_state(LedState::kMpuError);
+    status_led.tick(now_ms);
+    return;
+  }
+#endif
+
   switch (ros_state) {
     case RosState::kWaitAgent:
       status_led.set_state(LedState::kWaitAgent);
@@ -2139,8 +2147,7 @@ void setup() {
     Serial.println("MPU6050 OK");
     calibrate_gyro();
   } else {
-    Serial.println("MPU6050 not found — no heading hold / bump detect");
-    status_led.set_state(LedState::kMpuError);
+    Serial.println("MPU6050 not found at boot — will retry (no error tone yet)");
   }
   // Was 6144 on core0@pri4: stack overflow + WiFi-core contention → silent reboot
   // every 30–90s (BOOT_WIFI, no panic in telem). 16k on core1@pri3 with deferred
