@@ -10,7 +10,7 @@ Rover uses three ESP32-S3 nodes on WiFi; drive and sensors are split across two 
 
 **Drive board:** motors, MPU6050, wheel ticks, TFT, WS2812 ring, piezo speaker (GPIO 17), Go/E-stop, local safety.
 
-**Sensor board:** VL53L8CX, side VL53L0X, rear sonar + PCA9685 pan, STL-19P `/rover/scan` (`lidar_link`), fleet IR TX/RX (id 0; beacon TX disabled in build to avoid cam bloom).
+**Sensor board:** VL53L8CX, side VL53L0X, rear sonar + PCA9685 pan, STL-19P `/rover/scan` (`lidar_link`), fleet IR TX/RX (id 0; beacon TX disabled in build to avoid cam bloom). Onboard **RGB status LED** (GPIO 18, rail via LDO2): amber = Wi-Fi joining, slow blue = no agent, dim green = linked, red blink = reconnecting.
 
 **Camera:** MJPEG stream and I2S speaker for greetings (NUC Piper → HTTP play).
 

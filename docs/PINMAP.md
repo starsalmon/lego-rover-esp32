@@ -53,7 +53,8 @@ Motor **VM**/GND: 2S pack (~7–8.4 V). Driver **5Vo** → LilyGO JST (+/−), c
 | — | 14 | Fleet IR RX | TSOP38338 (or similar) | Active low; 38 kHz |
 | — | 15 | Lidar UART RX | STL-19P ZH1.5 pin 1 Tx | 230400 8N1, one-way |
 | — | 16 | Lidar PWM (reserve) | STL-19P pin 2 | Wired to **GND** for internal 10 Hz spin |
-| LDO2 | 17 | 3V3 LDO enable | On-board LDO2 | Must be HIGH before peripherals |
+| LDO2 | 17 | 3V3 LDO enable | On-board LDO2 + RGB rail | Must be HIGH before peripherals and WS2812 |
+| RGB | 18 | Status LED DIN | On-board WS2812 (×1) | Wi-Fi / agent colours; `pros3_status_led` (dim, non-blocking) |
 | — | 21 | Fleet IR TX | BC547 + IR LED | RMT 38 kHz; `ROVER_IR_BEACON_ON=0` (TX task idle; RX active) |
 | RF switch | 11 | Wi-Fi antenna | u.FL vs ceramic | HIGH = external u.FL (`ROVER_PROS3_ANT_EXTERNAL=1`) |
 
@@ -108,5 +109,5 @@ HTTP: `:80` capture/control, `:81/stream` MJPEG. OTA hostname `rover-cam`.
 | Board | GPIOs (not assigned in firmware) |
 |-------|----------------------------------|
 | T-Display-S3 | **IO13** (GPIO 13) — only free pin on the breakout header; all other header GPIOs are assigned (motors, ticks, I2C, TFT parallel bus including CS on 6, etc.) |
-| Pro S3 | 16 (reserved lidar PWM), 34, 35, 36, 37 — avoid 0, 3, 10, 17 (LDO2), 18 (RGB), 19/20 (USB), 33 (VBUS), 45, 46 |
+| Pro S3 | 16 (reserved lidar PWM), 34, 35, 36, 37 — avoid 0, 3, 10, 17 (LDO2), 18 (RGB status), 19/20 (USB), 33 (VBUS), 45, 46 |
 | AI cam | 44 (EXT IR, unused), USB/UART strapping per DFR1154 schematic |

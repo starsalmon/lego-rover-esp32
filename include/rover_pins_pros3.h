@@ -7,9 +7,13 @@
 #define ROVER_PROS3 1
 #endif
 
-// UM Pro S3 second LDO (GPIO17 / LDO2). Must be HIGH before external 3V3 peripherals.
+// UM Pro S3 second LDO (GPIO17 / LDO2). Must be HIGH before external 3V3 peripherals
+// and before the onboard WS2812 status LED (GPIO 18) will work.
 #ifndef PIN_PROS3_LDO2
 #define PIN_PROS3_LDO2 17
+#endif
+#ifndef PIN_PROS3_RGB_LED
+#define PIN_PROS3_RGB_LED 18
 #endif
 
 // ProS3[D] RF switch = GPIO11 (UM SeriesD helper RF_SWITCH): LOW=onboard ceramic, HIGH=external u.FL.

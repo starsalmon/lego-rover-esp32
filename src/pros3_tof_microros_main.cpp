@@ -53,6 +53,7 @@
 #include <vl53l8cx.h>
 
 #include "ir_tx.h"
+#include "pros3_status_led.h"
 #include "rover_lidar.h"
 #include "rover_ota.h"
 #include "rover_pins_pros3.h"
@@ -228,6 +229,8 @@ IPAddress g_agent_ip;
 
 enum class RosState { kWaitAgent, kConnect, kConnected, kDisconnect };
 RosState ros_state = RosState::kWaitAgent;
+Pros3StatusLed g_status_led;
+bool g_had_agent_session = false;
 
 #define RCCHECK(fn)                \
   {                                \
@@ -966,6 +969,7 @@ void handle_ros_state() {
       if (create_entities()) {
         entities_ok = true;
         ros_state = RosState::kConnected;
+        g_had_agent_session = true;
         g_ping_miss = 0;
         g_diag_up++;
         Serial.printf("[diag %lu] UROS_UP #%lu micro-ROS connected (lego_rover_tof)\n",
@@ -1178,6 +1182,7 @@ void setup() {
   }
 
   enable_ldo2();
+  g_status_led.begin(PIN_PROS3_RGB_LED);
   log_antenna();
 #if ROVER_WIFI_FIRST
   wifi_start();
@@ -1258,6 +1263,19 @@ void loop() {
 
   if (uros_wifi_transport_ok) {
     handle_ros_state();
+  }
+
+  {
+    Pros3StatusLedInput led_in;
+    led_in.wifi_connected = (WiFi.status() == WL_CONNECTED);
+    led_in.uros_transport = uros_wifi_transport_ok;
+    led_in.agent_connected =
+        (ros_state == RosState::kConnected && entities_ok);
+    led_in.agent_reconnecting =
+        (ros_state == RosState::kConnect || ros_state == RosState::kDisconnect ||
+         (ros_state == RosState::kWaitAgent && g_had_agent_session));
+    g_status_led.set_input(led_in);
+    g_status_led.tick(now);
   }
 
   if (g_servo_dirty) {

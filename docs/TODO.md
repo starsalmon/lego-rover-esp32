@@ -2,7 +2,7 @@
 
 ## Rover
 
-- [ ] Use the Pro S3 onboard LED (RGB on the ProS3) to show Wi-Fi / ROS 2 (micro-ROS agent) connection status.
+- [x] Use the Pro S3 onboard LED (RGB on the ProS3) to show Wi-Fi / ROS 2 (micro-ROS agent) connection status.
 
 ## Fleet-wide (same section in every bot's TODO)
 

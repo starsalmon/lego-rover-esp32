@@ -71,6 +71,7 @@ R1 **200 kΩ** (VM → GPIO16), R2 **100 kΩ** (GPIO16 → GND). Cal `BAT_ADC_SC
 | **14** / **21** | Fleet IR RX / TX (`ROVER_IR_BEACON_ON=0`, RX still counted) |
 | **15** | STL-19P UART RX |
 | **11** | RF: HIGH = u.FL |
+| **17** / **18** | LDO2 enable / onboard RGB status | WS2812×1; brief white at boot, then Wi-Fi / micro-ROS colours |
 
 Publishes `/rover/tof/*`, `/rover/sonar/range`, `/rover/scan`, `/rover/tof/lidar` diagnostics.
 
