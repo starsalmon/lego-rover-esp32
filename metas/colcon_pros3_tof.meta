@@ -1,0 +1,29 @@
+{
+    "names": {
+        "rmw_microxrcedds": {
+            "cmake-args": [
+                "-DRMW_UXRCE_MAX_NODES=1",
+                "-DRMW_UXRCE_MAX_PUBLISHERS=28",
+                "-DRMW_UXRCE_MAX_SUBSCRIPTIONS=8",
+                "-DRMW_UXRCE_MAX_SERVICES=1",
+                "-DRMW_UXRCE_MAX_CLIENTS=1",
+                "-DRMW_UXRCE_MAX_HISTORY=4",
+                "-DRMW_UXRCE_TRANSPORT=custom",
+                "-DRMW_UXRCE_STREAM_HISTORY=8",
+                "-DRMW_UXRCE_PUBLISH_RELIABLE_TIMEOUT=50"
+            ]
+        },
+        "microxrcedds_client": {
+            "cmake-args": [
+                "-DUCLIENT_PIC=OFF",
+                "-DUCLIENT_PROFILE_UDP=OFF",
+                "-DUCLIENT_PROFILE_TCP=OFF",
+                "-DUCLIENT_PROFILE_DISCOVERY=OFF",
+                "-DUCLIENT_PROFILE_SERIAL=OFF",
+                "-UCLIENT_PROFILE_STREAM_FRAMING=ON",
+                "-DUCLIENT_PROFILE_CUSTOM_TRANSPORT=ON",
+                "-DUCLIENT_CUSTOM_TRANSPORT_MTU=1400"
+            ]
+        }
+    }
+}

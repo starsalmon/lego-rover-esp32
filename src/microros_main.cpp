@@ -3,6 +3,7 @@
 #include <esp_system.h>
 #include <micro_ros_platformio.h>
 #include <WiFi.h>
+#include "wifi_roam.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -1497,6 +1498,14 @@ static void update_status_led(uint32_t now_ms) {
   const bool moving =
       cmd_fresh && (fabsf(last_lin) > 0.03f || fabsf(last_ang) > 0.03f);
 
+#if defined(ROVER_PERIPH)
+  if (!mpu.ok() && rover_boot_beep_local_grace_over(now_ms)) {
+    status_led.set_state(LedState::kMpuError);
+    status_led.tick(now_ms);
+    return;
+  }
+#endif
+
   switch (ros_state) {
     case RosState::kWaitAgent:
       status_led.set_state(LedState::kWaitAgent);
@@ -2138,8 +2147,7 @@ void setup() {
     Serial.println("MPU6050 OK");
     calibrate_gyro();
   } else {
-    Serial.println("MPU6050 not found — no heading hold / bump detect");
-    status_led.set_state(LedState::kMpuError);
+    Serial.println("MPU6050 not found at boot — will retry (no error tone yet)");
   }
   // Was 6144 on core0@pri4: stack overflow + WiFi-core contention → silent reboot
   // every 30–90s (BOOT_WIFI, no panic in telem). 16k on core1@pri3 with deferred
@@ -2150,7 +2158,7 @@ void setup() {
 
 #if defined(ROVER_MICROROS_WIFI)
 #ifndef ROVER_AGENT_IP
-#define ROVER_AGENT_IP "192.168.2.31"
+#define ROVER_AGENT_IP "192.168.3.172"
 #endif
 #ifndef ROVER_AGENT_PORT
 #define ROVER_AGENT_PORT 8888
@@ -2159,13 +2167,9 @@ void setup() {
   WiFi.setHostname("rover-esp");
   IPAddress rover_agent_ip;
   rover_agent_ip.fromString(ROVER_AGENT_IP);
-  // Strongest AP, not the first one found on the lowest channel (default FAST_SCAN); PS off and
-  // max TX before associating. (2026-11-10: T-Display at -70 dBm, 15% ping loss, 37 session drops.)
-  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
-  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
-  WiFi.setAutoReconnect(true);
-  WiFi.setSleep(WIFI_PS_NONE);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  // Strongest AP at join + app-level roam when signal is weak (multi-AP same SSID).
+  rover_wifi_sta_common_setup((int)WIFI_POWER_19_5dBm);
+  rover_wifi_roam_init(ROVER_WIFI_SSID, ROVER_WIFI_PASS);
   set_microros_wifi_transports(ROVER_WIFI_SSID, ROVER_WIFI_PASS, rover_agent_ip, ROVER_AGENT_PORT);
   WiFi.setSleep(WIFI_PS_NONE);
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
@@ -2230,6 +2234,9 @@ void loop() {
 #endif
 
   handle_ros_state();
+#if defined(ROVER_MICROROS_WIFI)
+  rover_wifi_roam_tick(now);
+#endif
 
 #if defined(ROVER_MCP_IR)
   poll_mcp_ir(now);
@@ -2420,7 +2427,13 @@ void loop() {
       if (n < (int)sizeof(drive_diag_buf) - 1) {
         const int now_ms_i = (int)millis();
         const int m = snprintf(drive_diag_buf + n, sizeof(drive_diag_buf) - n,
+#if defined(ROVER_MICROROS_WIFI)
+               " bssid=%02X roams=%lu"
+#endif
                " estop=%d batcrit=%d sblk=%ld ses=%d lin=%.2f ang=%.2f tgt=%.2f/%.2f cur=%.2f/%.2f stalls=%lu bumps=%lu cmds=%lu drop=%lu",
+#if defined(ROVER_MICROROS_WIFI)
+               rover_wifi_bssid_last_octet(), (unsigned long)rover_wifi_roam_count(),
+#endif
 #ifdef ROVER_TDISPLAY_S3
                (int)estop.active(), (int)battery.critical(),
 #else

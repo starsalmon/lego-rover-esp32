@@ -1,59 +1,62 @@
 # LEGO Rover — ESP32-S3 firmware
 
-Rover is dual-board, both thin WiFi micro-ROS clients of the brain:
+Rover uses three ESP32-S3 nodes on WiFi; drive and sensors are split across two micro-ROS clients on the brain (Jazzy, agent `192.168.3.172:8888`).
 
-- **T-Display-S3 drive board** (`rover-esp`, .71) — motors, MPU6050 IMU, wheel ticks, LED ring, speaker, Go/E-stop, display, local safety. Env `s3_tdisplay_microros_rover_drive` (`src/microros_main.cpp`).
-- **Pro S3 ToF board** (`rover-tof`) — VL53L8CX front, VL53L0X sides, PCA9685. Env `um_pros3_tof_microros` (`src/pros3_tof_microros_main.cpp`).
+| Board | Hostname | Firmware env | Source |
+|-------|----------|--------------|--------|
+| LilyGO **T-Display-S3** | `rover-esp` | `s3_tdisplay_microros_rover_drive` | `src/microros_main.cpp` |
+| UM **Pro S3[D]** | `rover-tof` | `um_pros3_tof_microros` | `src/pros3_tof_microros_main.cpp` |
+| DFRobot **AI Camera** | `rover-cam` | `aicam_rover_cam` | `src/aicam_main.cpp` |
 
-**Brain:** NUC `brain` (192.168.3.172) runs `rover-brain` in Docker under `/data/swarm/robot-fleet` (ROS 2 Jazzy), micro-ROS agent on UDP 8888.
+**Drive board:** motors, MPU6050, wheel ticks, TFT, WS2812 ring, piezo speaker (GPIO 17), Go/E-stop, local safety.
 
-## Flash
+**Sensor board:** VL53L8CX, side VL53L0X, rear sonar + PCA9685 pan, STL-19P `/rover/scan` (`lidar_link`), fleet IR TX/RX (id 0; beacon TX disabled in build to avoid cam bloom). Onboard **RGB status LED** (GPIO 18, rail via LDO2): amber = Wi-Fi joining, slow blue = no agent, dim green = linked, red blink = reconnecting.
 
-See `WIRING.md` → Flash. Turn `allow_drive` OFF before an OTA.
-
-## Use
-
-1. Power the rover (both boards join WiFi and the agent).
-2. `allow_drive` ON via MQTT `lab/robots/allow_drive/set`.
-3. Tap **Go** (or publish `/rover/button` true) → brain session starts → explore publishes `/cmd_vel`.
-4. The drive board enforces E-stop, stall lockout and cmd timeout; explore/escape logic is on the brain.
-
-Diagnostics: `/rover/drive_diag` (drive board, 1 Hz).
+**Camera:** MJPEG stream and I2S speaker for greetings (NUC Piper → HTTP play).
 
 ## Docs
 
-- `WIRING.md` — pins for both boards
-- `../lego-rover-ros2/ROVER_BEHAVIOR.md` — explore behaviour
-- `../c3-mini-bot/docs/SWARM.md` — fleet
+- [`docs/PINMAP.md`](docs/PINMAP.md) — pin map (three boards)
+- [`WIRING.md`](WIRING.md) — wiring summary and flash commands
+- [`docs/TODO.md`](docs/TODO.md) — Rover and fleet future plans
+
+## Flash
+
+See `WIRING.md` → Flash. Turn `allow_drive` OFF before OTA. Wi-Fi in gitignored `platformio_private.ini` (see `platformio_private.ini.example`).
+
+## Use
+
+1. Power all boards (Wi-Fi + micro-ROS agent on the two ROS nodes).
+2. `allow_drive` ON via MQTT `lab/robots/allow_drive/set`.
+3. Tap **Go** (or `/rover/button` true) → brain session → explore publishes `/cmd_vel`.
+4. Drive board enforces E-stop, stall lockout, and cmd timeout.
+
+Diagnostics: `/rover/drive_diag` (drive, 1 Hz); `bssid=` / `roams=` show the associated AP and app roam count. Pro S3 `/rover/tof/wifi` adds `bssid` last octet and roam count as elements 7–8.
+
+### Wi-Fi roaming (same SSID, multiple APs)
+
+Both ROS nodes use shared `wifi_roam` (`src/wifi_roam.cpp`): `wifi_sta_config_t` rm/btm (802.11k/v) where the SDK exposes those fields (Arduino-ESP32 3.2 / IDF 4.4 here), plus a non-blocking scan every 10 s when RSSI &lt; −70 dBm. If another BSSID is ≥ 8 dB stronger, reconnect directly (min 30 s between roams). Power save stays off; TX power unchanged. Serial logs each roam with old/new RSSI and BSSID.
 
 ## T-Display boot beeps
 
-The passive buzzer (GPIO 17) plays a short non-blocking diagnostic sequence at boot (LEDC, speaker task ? it never stalls drive or micro-ROS).
+Passive buzzer on GPIO 17 plays a short non-blocking sequence at boot (LEDC speaker task).
 
-Order:
+Order: power chirp → Wi-Fi (optional) → agent (optional) → hardware OK triad → or error codes (low double + N short beeps). Error codes play only after grace: **20 s** for local I2C/IMU/encoders, **45 s** for micro-ROS agent and Pro S3 ToF topics (`ROVER_BOOT_BEEP_LOCAL_GRACE_MS` / `ROVER_BOOT_BEEP_NETWORK_GRACE_MS`). Pro S3 RGB LED uses the same 45 s window before “no agent” styling.
 
-1. **Power-on chirp** ? one short pip as early as possible in `setup()`, before the rest of the hardware init.
-2. **Wi-Fi connected** (optional, short rising pair) once the station has an IP.
-3. **Agent link** (optional, short pair) when the micro-ROS session comes up.
-4. **Hardware OK** ? a cheerful three-note triad, as soon as every device below looks healthy.
-5. **Hardware error** ? if anything is still missing after ~15 s: a low double beep, then **N** short beeps for each failed device (250 ms between codes).
+| N | Device | Health check |
+|---|--------|----------------|
+| 1 | IMU (MPU6050) | `mpu.ok()` |
+| 2 | Wheel ticks | GPIO 11/12 ISRs attached |
+| 3 | VL53L8 (Pro S3) | `/rover/tof/status[12]` or fresh `l8_cols` |
+| 4 | Side VL53 left | `[13]` or `/rover/tof/left` |
+| 5 | Side VL53 right | `[14]` or `/rover/tof/right` |
+| 6 | Rear sonar | `[11]` (no echo is OK) |
+| 7 | PCA9685 pan | `[2] ≥ 0.5` |
+| 8 | micro-ROS agent | Session + Pro S3 status path |
 
-### Error code table (N short beeps)
+Spoken time-of-day greeting is streamed from the NUC to the AI cam (`GET /play?url=`), not the piezo.
 
-| N | Device | How it is judged |
-|---|--------|------------------|
-| 1 | IMU (MPU6050) on the T-Display | `mpu.ok()` |
-| 2 | Wheel-tick encoders on the T-Display | GPIO ISRs on the tick pins were attached. The MCP IR expander is optional and `mcp=0` in drive_diag is not an encoder fault. |
-| 3 | VL53L8CX front (Pro S3) | Device init flag in `/rover/tof/status[12]`, or recent `/rover/tof/l8_cols`. No-target is healthy. |
-| 4 | Side VL53 left (Pro S3) | Init flag `[13]` or a recent `/rover/tof/left` message (any range, including out of range). |
-| 5 | Side VL53 right (Pro S3) | Init flag `[14]` or a recent `/rover/tof/right` message. |
-| 6 | Rear sonar (Pro S3) | Init flag `/rover/tof/status[11]`. A range of -1 / no echo is healthy. |
-| 7 | PCA9685 pan servo (Pro S3) | `/rover/tof/status[2]` ? 0.5 with a fresh status |
-| 8 | micro-ROS agent | No agent session / no path to the Pro S3 status topics |
+## Related
 
-A sensor that is present but has nothing in range (ToF no-target, sonar no echo) is treated as healthy. Only a missing device, I2C NACK, or init failure is an error.
-
-The sequence is also logged as `boot_beep ...` on serial and via `rover_diag_event` (see `/rover/drive_diag` / telem).
-
-The spoken ?Hi, good morning/afternoon/evening?? greeting is **not** on the buzzer. The NUC `rover-boot-greet` service synthesises it with Piper (same Alan voice as rover-speech) and streams it to the AI cam with `GET /play?url=`.
-
+- `../lego-rover-ros2/ROVER_BEHAVIOR.md` — explore behaviour
+- `../c3-mini-bot/docs/SWARM.md` — fleet IR protocol

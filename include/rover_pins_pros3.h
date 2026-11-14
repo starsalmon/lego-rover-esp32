@@ -7,14 +7,16 @@
 #define ROVER_PROS3 1
 #endif
 
-// UM Pro S3 second LDO (GPIO17 / LDO2). Must be HIGH before external 3V3 peripherals.
+// UM Pro S3 second LDO (GPIO17 / LDO2). Must be HIGH before external 3V3 peripherals
+// and before the onboard WS2812 status LED (GPIO 18) will work.
 #ifndef PIN_PROS3_LDO2
 #define PIN_PROS3_LDO2 17
 #endif
+#ifndef PIN_PROS3_RGB_LED
+#define PIN_PROS3_RGB_LED 18
+#endif
 
 // ProS3[D] RF switch = GPIO11 (UM SeriesD helper RF_SWITCH): LOW=onboard ceramic, HIGH=external u.FL.
-// GPIO37 (used before 2026-11-10) is NOT the RF switch, so the board never left the onboard antenna.
-// Same pin/level as Jazz (starsalmon/jazz 3ac7e7e).
 #ifndef PIN_PROS3_ANT_SEL
 #define PIN_PROS3_ANT_SEL 11
 #endif
@@ -102,7 +104,14 @@
 #define IR_TX_LEDC_CHANNEL 4
 #endif
 
-// Spares for later: 15, 16, 34–37
+// STL-19P / Waveshare D500 lidar. UART1 RX only — the lidar transmits, the ESP
+// does not. PWM is wired to GND (internal 10 Hz); do not drive GPIO 16 unless
+// that wire is moved off ground for external speed control.
+#ifndef LIDAR_RX_PIN
+#define LIDAR_RX_PIN 15
+#endif
+
+// GPIO 16 reserved for optional lidar motor PWM. 34–37 still spare.
 // Avoid: 0, 3, 10, 17 (LDO2), 18 (RGB), 19/20 (USB), 33 (VBUS), 45, 46
 
 #ifndef ROVER_HOSTNAME
