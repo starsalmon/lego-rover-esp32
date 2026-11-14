@@ -30,7 +30,8 @@ Three ESP32-S3 boards: T-Display (drive + TFT), Pro S3 (sensors + fleet IR), AI 
 | TFT BL | 38 | LCD backlight | ST7789 BL | HIGH = on |
 | IO43 | 43 | I2C SDA | MPU6050 SDA | 400 kHz |
 | IO44 | 44 | I2C SCL | MPU6050 SCL | |
-| TFT DC | 7 | TFT DC | ST7789 | Parallel 8-bit (see TFT pins) |
+| TFT CS | 6 | TFT CS | ST7789 | Parallel chip select (LilyGO Setup206; see `platformio.ini` `[env:s3_tft_flags]`) |
+| TFT DC | 7 | TFT DC | ST7789 | Parallel data/command |
 | TFT RST | 5 | TFT RST | ST7789 | |
 | TFT WR | 8 | TFT WR | ST7789 | |
 | TFT RD | 9 | TFT RD | ST7789 | |
@@ -106,6 +107,6 @@ HTTP: `:80` capture/control, `:81/stream` MJPEG. OTA hostname `rover-cam`.
 
 | Board | GPIOs (not assigned in firmware) |
 |-------|----------------------------------|
-| T-Display-S3 | 4, 5, 6, 13, 19, 20, 35, 36, 37, 46 (many consumed by parallel TFT — avoid reassigning TFT bus pins) |
+| T-Display-S3 | **IO13** (GPIO 13) — only free pin on the breakout header; all other header GPIOs are assigned (motors, ticks, I2C, TFT parallel bus including CS on 6, etc.) |
 | Pro S3 | 16 (reserved lidar PWM), 34, 35, 36, 37 — avoid 0, 3, 10, 17 (LDO2), 18 (RGB), 19/20 (USB), 33 (VBUS), 45, 46 |
 | AI cam | 44 (EXT IR, unused), USB/UART strapping per DFR1154 schematic |

@@ -31,7 +31,7 @@ Fleet IR id **0** lives on the Pro S3 (GPIO 14 RX, GPIO 21 TX). The drive board 
 | **38** | LCD backlight |
 | **43** / **44** | I2C — MPU6050 @ **0x68** |
 
-Parallel TFT uses GPIO 5, 7–9, 39–42, 45–48 (see `docs/PINMAP.md`).
+Parallel TFT uses GPIO 6 (CS), 5 (RST), 7–9, 39–42, 45–48 (see `docs/PINMAP.md`). Free header pin: **IO13** only.
 
 Motors: **A = left**, **B = right**. Firmware `MOTOR_INVERT_L/R=1`, `PWM_FREQ_HZ=30000`, floor **0.55**.
 

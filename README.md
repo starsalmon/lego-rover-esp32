@@ -14,7 +14,11 @@ Rover uses three ESP32-S3 nodes on WiFi; drive and sensors are split across two 
 
 **Camera:** MJPEG stream and I2S speaker for greetings (NUC Piper → HTTP play).
 
-Pin-level wiring: **`docs/PINMAP.md`**. Summary: **`WIRING.md`**.
+## Docs
+
+- [`docs/PINMAP.md`](docs/PINMAP.md) — pin map (three boards)
+- [`WIRING.md`](WIRING.md) — wiring summary and flash commands
+- [`docs/TODO.md`](docs/TODO.md) — Rover and fleet future plans
 
 ## Flash
 
