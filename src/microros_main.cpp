@@ -416,6 +416,12 @@ static bool entities_ok = false;
 // support_ok: rclc_support_init succeeded (session exists) even if later entity
 // creation failed. destroy_entities must tear that partial state down too.
 static bool support_ok = false;
+// Executor handles: 8 subscriptions in use (session, cmd_vel, heartbeat,
+// servo/status, 3x ring ToF, speaker). metas/colcon_rover.meta allows 12
+// subscriptions; keep the executor at the same 12 so neither is at its limit.
+#ifndef ROVER_UROS_EXEC_HANDLES
+#define ROVER_UROS_EXEC_HANDLES 12
+#endif
 #ifndef ROVER_UROS_PING_PERIOD_MS
 #define ROVER_UROS_PING_PERIOD_MS 200
 #endif
@@ -425,6 +431,28 @@ static bool support_ok = false;
 #ifndef ROVER_UROS_PING_MISS
 #define ROVER_UROS_PING_MISS 6
 #endif
+// The XRCE session is not thread-safe. Ping must hold uros_mu like every other
+// rcl/rmw call; if the session is busy (another task mid-publish) skip this ping
+// instead of counting a miss.
+#ifndef ROVER_UROS_PING_LOCK_MS
+#define ROVER_UROS_PING_LOCK_MS 30
+#endif
+// Subscription data from the agent (/rover/session 20 Hz, /rover/heartbeat 2 Hz)
+// proves the session is alive even when a single pong goes missing.
+#ifndef ROVER_UROS_RX_LIVE_MS
+#define ROVER_UROS_RX_LIVE_MS 1000
+#endif
+// Hard cap: reconnect after this many failed pings in a row even with inbound data.
+#ifndef ROVER_UROS_PING_FAIL_HARD
+#define ROVER_UROS_PING_FAIL_HARD (ROVER_UROS_PING_MISS * 4)
+#endif
+// Reliable /imu/data publish runs the session until the agent ACKs (default up to
+// 1000 ms) while holding uros_mu. Keep that short; unacked samples are still
+// retransmitted by the reliable stream.
+#ifndef ROVER_UROS_IMU_PUB_TIMEOUT_MS
+#define ROVER_UROS_IMU_PUB_TIMEOUT_MS 50
+#endif
+static uint16_t uros_ping_fail_streak = 0;
 static uint8_t uros_ping_miss = 0;
 static uint32_t uros_diag_up = 0, uros_diag_lost = 0, uros_diag_fail = 0,
                 uros_diag_miss_total = 0;
@@ -968,10 +996,20 @@ static bool create_entities() {
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
   support_ok = true;
   RCCHECK(rclc_node_init_default(&node, "lego_rover_esp32", "", &support));
+  // Drive-critical entities first: /rover/session + cmd_vel and their executor
+  // handles. Any later failure still tears everything down (see kConnect).
+  RCCHECK(rclc_subscription_init_default(
+    &session_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "rover/session"));
   RCCHECK(rclc_subscription_init_default(
     &sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel"));
+  RCCHECK(rclc_executor_init(&executor, &support.context, ROVER_UROS_EXEC_HANDLES, &allocator));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &session_sub, &session_msg, &on_session, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &sub, &cmd_msg, &on_cmd, ON_NEW_DATA));
   RCCHECK(rclc_publisher_init_default(
     &imu_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu), "imu/data"));
+  (void)rmw_uros_set_publisher_session_timeout(rcl_publisher_get_rmw_handle(&imu_pub), ROVER_UROS_IMU_PUB_TIMEOUT_MS);
   RCCHECK(rclc_publisher_init_default(
     &drive_diag_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
     "rover/drive_diag"));
@@ -1064,11 +1102,8 @@ static bool create_entities() {
 #endif
 #endif
   RCCHECK(rclc_subscription_init_default(
-    &session_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "rover/session"));
-  RCCHECK(rclc_subscription_init_default(
     &heartbeat_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
     "rover/heartbeat"));
-  RCCHECK(rclc_executor_init(&executor, &support.context, 8, &allocator));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &heartbeat_sub, &heartbeat_msg, &on_heartbeat, ON_NEW_DATA));
 #if defined(RING_REMOTE_TOF)
@@ -1104,8 +1139,6 @@ static bool create_entities() {
   RCCHECK(rclc_executor_add_subscription(
     &executor, &ring_tr_sub, &ring_tr_msg, &on_ring_tr, ON_NEW_DATA));
 #endif
-  RCCHECK(rclc_executor_add_subscription(
-    &executor, &session_sub, &session_msg, &on_session, ON_NEW_DATA));
 #if defined(ROVER_SONAR)
   RCCHECK(rclc_executor_add_subscription(
     &executor, &sonar_cal_sweep_sub, &sonar_cal_sweep_msg, &on_sonar_cal_sweep,
@@ -1119,8 +1152,6 @@ static bool create_entities() {
     &executor, &servo_angle_sub, &servo_angle_msg, &on_servo_angle, ON_NEW_DATA));
 #endif
 #endif
-  RCCHECK(rclc_executor_add_subscription(
-    &executor, &sub, &cmd_msg, &on_cmd, ON_NEW_DATA));
   RCCHECK(rclc_subscription_init_default(
     &speaker_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32), "rover/speaker/code"));
   RCCHECK(rclc_executor_add_subscription(
@@ -1179,67 +1210,79 @@ static bool create_entities() {
   return true;
 }
 
+// Teardown must never skip a fini: a skipped fini leaks an rmw pool slot and the
+// next create_entities fails (fail=N@heartbeat/speaker). Call directly; the
+// caller already holds uros_mu (recursive) or entities_ok=false has fenced off
+// the other tasks.
+#define UROS_FINI(fn) \
+  { \
+    rcl_ret_t rc = fn; \
+    (void)rc; \
+  }
 static void destroy_entities() {
   // Previously returned when !entities_ok, which leaked the session/node after a
   // partial create_entities failure and wedged every later reconnect.
   if (!entities_ok && !support_ok) return;
-  // Serialize against imu_diag_task rcl_publish / main spin.
-  (void)uros_lock(pdMS_TO_TICKS(200));
+  // Serialize against imu_diag_task rcl_publish / main spin. Wait long enough to
+  // outlast a reliable publish: if this lock fails, every RCSOFTCHECK below can
+  // also miss its 40 ms lock and skip the fini, leaking rmw pool slots so the next
+  // create_entities fails on the last subscription (drive_diag fail=N@speaker_sub).
+  const bool destroy_locked = uros_lock(pdMS_TO_TICKS(1500));
   entities_ok = false;
 
   rmw_context_t *rmw_context = rcl_context_get_rmw_context(&support.context);
   (void)rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
 
-  RCSOFTCHECK(rcl_subscription_fini(&sub, &node));
-  RCSOFTCHECK(rcl_subscription_fini(&session_sub, &node));
-  RCSOFTCHECK(rcl_subscription_fini(&speaker_sub, &node));
-  RCSOFTCHECK(rcl_subscription_fini(&heartbeat_sub, &node));
+  UROS_FINI(rcl_subscription_fini(&sub, &node));
+  UROS_FINI(rcl_subscription_fini(&session_sub, &node));
+  UROS_FINI(rcl_subscription_fini(&speaker_sub, &node));
+  UROS_FINI(rcl_subscription_fini(&heartbeat_sub, &node));
 #if defined(RING_REMOTE_TOF)
-  RCSOFTCHECK(rcl_subscription_fini(&ring_l8_sub, &node));
-  RCSOFTCHECK(rcl_subscription_fini(&ring_tl_sub, &node));
-  RCSOFTCHECK(rcl_subscription_fini(&ring_tr_sub, &node));
+  UROS_FINI(rcl_subscription_fini(&ring_l8_sub, &node));
+  UROS_FINI(rcl_subscription_fini(&ring_tl_sub, &node));
+  UROS_FINI(rcl_subscription_fini(&ring_tr_sub, &node));
 #endif
-  RCSOFTCHECK(rcl_publisher_fini(&imu_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&drive_diag_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&bump_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&stall_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&button_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&button_event_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&drive_mode_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&battery_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&imu_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&drive_diag_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&bump_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&stall_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&button_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&button_event_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&drive_mode_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&battery_pub, &node));
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
-  RCSOFTCHECK(rcl_publisher_fini(&wheel_l_ticks_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&wheel_r_ticks_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&wheel_l_ticks_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&wheel_r_ticks_pub, &node));
 #endif
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_SONAR)
-  RCSOFTCHECK(rcl_publisher_fini(&sonar_range_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&sonar_pan_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&sonar_avoid_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&sonar_escape_event_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&sonar_escape_turn_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&sonar_escape_best_deg_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&sonar_escape_best_m_pub, &node));
-  RCSOFTCHECK(rcl_subscription_fini(&sonar_cal_sweep_sub, &node));
+  UROS_FINI(rcl_publisher_fini(&sonar_range_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&sonar_pan_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&sonar_avoid_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&sonar_escape_event_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&sonar_escape_turn_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&sonar_escape_best_deg_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&sonar_escape_best_m_pub, &node));
+  UROS_FINI(rcl_subscription_fini(&sonar_cal_sweep_sub, &node));
 #endif
 #if defined(ROVER_VL53L)
-  RCSOFTCHECK(rcl_publisher_fini(&tof_left_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&tof_right_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&tof_left_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&tof_right_pub, &node));
 #endif
 #if defined(ROVER_VL53L8)
-  RCSOFTCHECK(rcl_publisher_fini(&tof_front_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&tof_front_left_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&tof_front_right_pub, &node));
-  RCSOFTCHECK(rcl_publisher_fini(&tof_l8_cols_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&tof_front_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&tof_front_left_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&tof_front_right_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&tof_l8_cols_pub, &node));
 #endif
 #ifdef ROVER_TDISPLAY_S3
-  RCSOFTCHECK(rcl_subscription_fini(&servo_angle_sub, &node));
+  UROS_FINI(rcl_subscription_fini(&servo_angle_sub, &node));
 #endif
   rclc_executor_fini(&executor);
-  RCSOFTCHECK(rcl_node_fini(&node));
+  UROS_FINI(rcl_node_fini(&node));
   rclc_support_fini(&support);
   entities_ok = false;
   support_ok = false;
-  uros_unlock();
+  if (destroy_locked) uros_unlock();
 }
 
 static void on_session_lost() {
@@ -1413,18 +1456,33 @@ static void handle_ros_state() {
       break;
     }
     last_uros_ping_ms = now;
-    if (RMW_RET_OK == rmw_uros_ping_agent(100, 1)) {
-      Serial.println("micro-ROS agent found — connecting...");
-      ros_state = RosState::kConnect;
+    if (!uros_lock(pdMS_TO_TICKS(ROVER_UROS_PING_LOCK_MS))) {
+      break;
+    }
+    {
+      const bool found = (RMW_RET_OK == rmw_uros_ping_agent(100, 1));
+      uros_unlock();
+      if (found) {
+        Serial.println("micro-ROS agent found — connecting...");
+        ros_state = RosState::kConnect;
+      }
     }
     break;
 
-  case RosState::kConnect:
-    if (create_entities()) {
+  case RosState::kConnect: {
+    const bool create_locked = uros_lock(pdMS_TO_TICKS(1500));
+    const bool created = create_entities();
+    if (!created) {
+      // Never leave a half-alive session: full teardown, then re-handshake.
+      destroy_entities();
+    }
+    if (create_locked) uros_unlock();
+    if (created) {
       entities_ok = true;
       ros_state = RosState::kConnected;
       ros_connected_at_ms = millis();
       uros_ping_miss = 0;
+      uros_ping_fail_streak = 0;
       uros_diag_up++;
       Serial.printf("[diag %lu] UROS_UP #%lu micro-ROS ready mpu=%d\n",
                     (unsigned long)millis(), (unsigned long)uros_diag_up, (int)mpu.ok());
@@ -1447,29 +1505,51 @@ static void handle_ros_state() {
       Serial.printf("[diag %lu] UROS_CREATE_FAIL #%lu line=%d rc=%d — retrying\n",
                     (unsigned long)millis(), (unsigned long)uros_diag_fail,
                     uros_diag_fail_line, uros_diag_fail_rc);
-      destroy_entities();
       ros_state = RosState::kWaitAgent;
     }
     break;
+  }
 
   case RosState::kConnected:
     if (now - last_uros_ping_ms < ROVER_UROS_PING_PERIOD_MS) {
       break;
     }
     last_uros_ping_ms = now;
-    if (RMW_RET_OK != rmw_uros_ping_agent(ROVER_UROS_PING_MS, 1)) {
-      uros_ping_miss++;
-      uros_diag_miss_total++;
-      if (uros_ping_miss >= ROVER_UROS_PING_MISS) {
-        uros_diag_lost++;
-        Serial.printf("[diag %lu] UROS_LOST #%lu after %u misses rssi=%d\n",
-                      (unsigned long)now, (unsigned long)uros_diag_lost,
-                      (unsigned)uros_ping_miss, WiFi.RSSI());
+    // Pinging outside uros_mu raced imu_diag_task (core 1, prio 3), whose reliable
+    // rcl_publish runs the same XRCE session: shared custom-transport rx buffer,
+    // on_pong_flag reset after send, concurrent output-stream flush. Pongs were
+    // lost/clobbered, 6 "misses" tore down a healthy session (agent log: closed +
+    // established every few seconds while ICMP ping stayed at 0% loss).
+    if (!uros_lock(pdMS_TO_TICKS(ROVER_UROS_PING_LOCK_MS))) {
+      break;  // session busy = in use; not evidence of a dead agent
+    }
+    {
+      const bool pong = (RMW_RET_OK == rmw_uros_ping_agent(ROVER_UROS_PING_MS, 1));
+      uros_unlock();
+      const uint32_t t = millis();
+      const bool rx_recent =
+          last_pi_traffic_ms != 0 && (t - last_pi_traffic_ms) < ROVER_UROS_RX_LIVE_MS;
+      if (pong) {
         uros_ping_miss = 0;
+        uros_ping_fail_streak = 0;
+        break;
+      }
+      uros_diag_miss_total++;
+      if (uros_ping_fail_streak < 0xFFFF) uros_ping_fail_streak++;
+      if (!rx_recent) {
+        uros_ping_miss++;
+      }
+      if (uros_ping_miss >= ROVER_UROS_PING_MISS ||
+          uros_ping_fail_streak >= ROVER_UROS_PING_FAIL_HARD) {
+        uros_diag_lost++;
+        Serial.printf("[diag %lu] UROS_LOST #%lu after %u misses (streak %u, rx_age=%ld) rssi=%d\n",
+                      (unsigned long)t, (unsigned long)uros_diag_lost,
+                      (unsigned)uros_ping_miss, (unsigned)uros_ping_fail_streak,
+                      last_pi_traffic_ms ? (long)(t - last_pi_traffic_ms) : -1L, WiFi.RSSI());
+        uros_ping_miss = 0;
+        uros_ping_fail_streak = 0;
         ros_state = RosState::kDisconnect;
       }
-    } else {
-      uros_ping_miss = 0;
     }
     break;
 
