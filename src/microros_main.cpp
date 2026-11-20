@@ -1047,19 +1047,18 @@ static bool create_entities() {
   RCCHECK(rclc_node_init_default(&node, "lego_rover_esp32", "", &support));
   // Drive-critical entities first: /rover/session + cmd_vel and their executor
   // handles. Any later failure still tears everything down (see kConnect).
-  RCCHECK(rclc_subscription_init_default(
+  RCCHECK(rclc_subscription_init_best_effort(
     &session_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "rover/session"));
-  RCCHECK(rclc_subscription_init_default(
+  RCCHECK(rclc_subscription_init_best_effort(
     &sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel"));
   RCCHECK(rclc_executor_init(&executor, &support.context, ROVER_UROS_EXEC_HANDLES, &allocator));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &session_sub, &session_msg, &on_session, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &sub, &cmd_msg, &on_cmd, ON_NEW_DATA));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &imu_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu), "imu/data"));
-  (void)rmw_uros_set_publisher_session_timeout(rcl_publisher_get_rmw_handle(&imu_pub), ROVER_UROS_IMU_PUB_TIMEOUT_MS);
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &drive_diag_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
     "rover/drive_diag"));
   RCCHECK(rclc_publisher_init_default(
@@ -1074,74 +1073,74 @@ static bool create_entities() {
   RCCHECK(rclc_publisher_init_default(
     &drive_mode_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
     "rover/drive_mode"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &battery_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/battery/voltage"));
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &wheel_l_ticks_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
     "rover/wheel/left_ticks"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &wheel_r_ticks_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
     "rover/wheel/right_ticks"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &wheel_l_ticks_signed_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
     "rover/wheel/left_ticks_signed"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &wheel_r_ticks_signed_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
     "rover/wheel/right_ticks_signed"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &ir_detected_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
     "rover/ir/detected"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &ir_peer_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
     "rover/ir/peer"));
 #endif
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_SONAR)
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_range_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/sonar/range"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_pan_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/sonar/pan_deg"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_avoid_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
     "rover/sonar/avoid_active"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_escape_event_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
     "rover/sonar/escape_event"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_escape_turn_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/sonar/escape_turn"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_escape_best_deg_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/sonar/escape_best_deg"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_escape_best_m_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/sonar/escape_best_m"));
-  RCCHECK(rclc_subscription_init_default(
+  RCCHECK(rclc_subscription_init_best_effort(
     &sonar_cal_sweep_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
     "rover/sonar/cal_sweep"));
 #endif
 #if defined(ROVER_VL53L)
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &tof_left_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/tof/left"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &tof_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/tof/right"));
 #endif
 #if defined(ROVER_VL53L8)
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &tof_front_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/tof/front"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &tof_front_left_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/tof/front_left"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &tof_front_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/tof/front_right"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &tof_l8_cols_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
     "rover/tof/l8_cols"));
 #endif
@@ -1151,12 +1150,12 @@ static bool create_entities() {
     &servo_angle_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
     "rover/tof/status"));
 #else
-  RCCHECK(rclc_subscription_init_default(
+  RCCHECK(rclc_subscription_init_best_effort(
     &servo_angle_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/servo/angle"));
 #endif
 #endif
-  RCCHECK(rclc_subscription_init_default(
+  RCCHECK(rclc_subscription_init_best_effort(
     &heartbeat_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
     "rover/heartbeat"));
   RCCHECK(rclc_executor_add_subscription(
@@ -1725,9 +1724,8 @@ static bool imu_stationary() {
 #define ROVER_DIAG_PERIOD_MS 100
 #endif
 
-// FreeRTOS IMU sample + /imu/data publish + DIAG tick. Main loop period was
-// 200–500 ms (display/ToF/spin), so millis() gates in loop() could never hit
-// the 20 Hz / 10 Hz targets. This task owns the rates; rcl ops take uros_mu.
+// FreeRTOS IMU sample + /imu/data publish + DIAG tick (25 ms task period).
+// Main loop is too slow for steady sensor rates; this task owns IMU publish.
 static void imu_diag_task(void *param) {
   (void)param;
   static uint32_t last_imu_pub = 0;
@@ -1736,11 +1734,11 @@ static void imu_diag_task(void *param) {
   static bool imu_frame_ready = false;
   TickType_t wake = xTaskGetTickCount();
 
+  constexpr uint32_t IMU_TICK_MS = 25;
+  constexpr uint32_t IMU_PUB_PERIOD_MS = IMU_TICK_MS;
+
   for (;;) {
     const uint32_t now = millis();
-    constexpr uint32_t CMD_TIMEOUT_MS = 400;
-    const bool driving = (now - last_drive_ms) <= CMD_TIMEOUT_MS;
-    const uint32_t imu_period = driving ? 25 : 28;  // ~36 Hz idle target
 
     float ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
     const bool imu_ok = mpu.ok() && mpu.read(ax, ay, az, gx, gy, gz);
@@ -1787,7 +1785,7 @@ static void imu_diag_task(void *param) {
     const bool imu_clear = true;
 #endif
 
-    if (imu_ok && imu_clear && (now - last_imu_pub >= imu_period)) {
+    if (imu_ok && imu_clear && (now - last_imu_pub >= IMU_PUB_PERIOD_MS)) {
       if (!imu_frame_ready) {
         static char imu_frame_id[] = "imu_link";
         imu_msg.header.frame_id.data = imu_frame_id;
@@ -1831,8 +1829,7 @@ static void imu_diag_task(void *param) {
       }
 
       bool do_motion = false;
-      // Wait briefly for executor/tof publishers; 5 ms was dropping ~half the
-      // IMU slots under load (measured ~17 Hz vs 30 ms period target).
+      // Brief uros_mu wait; best-effort publish must not block on reliable ACKs.
       // Only advance last_imu_pub after a successful publish (or when unconnected).
       if (uros_lock(pdMS_TO_TICKS(20))) {
         if (ros_state == RosState::kConnected && entities_ok) {
@@ -1918,9 +1915,7 @@ static void imu_diag_task(void *param) {
     }
 #endif
 
-    // Fixed 25 ms tick: idle publishes every 2nd tick (~20 Hz), driving every tick (~40 Hz).
-    // Keeps schedule tight when DIAG was deferred and when uros_mu briefly contends.
-    constexpr uint32_t IMU_TICK_MS = 25;
+    // One publish per 25 ms tick → ~40 Hz /imu/data (matches task cadence).
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(IMU_TICK_MS));
   }
 }
