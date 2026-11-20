@@ -31,7 +31,21 @@ See `WIRING.md` → Flash. Turn `allow_drive` OFF before OTA. Wi-Fi in gitignore
 3. Tap **Go** (or `/rover/button` true) → brain session → explore publishes `/cmd_vel`.
 4. Drive board enforces E-stop, stall lockout, and cmd timeout.
 
-Diagnostics: `/rover/drive_diag` (drive, 1 Hz); `bssid=` / `roams=` show the associated AP and app roam count. Pro S3 `/rover/tof/wifi` adds `bssid` last octet and roam count as elements 7–8.
+### Fleet PS4 manual drive (ESP-NOW)
+
+The **T-Display** drive board (`s3_tdisplay_microros_rover_drive`) can take manual drive from the fleet PS4 bridge (NodeMCU-32S, jazz `ps4_bridge_fleet` env). Pairing matches Jazz/Roby: bridge MAC `e0:8c:fe:f9:c2:34`, Share short-press cycles target (Rover = slot **2** once jazz bridge adds it).
+
+| Control | Action |
+|---------|--------|
+| **Options** | Toggle manual ON/OFF (motors never run until manual + live link) |
+| **Left stick X** | Steer (expo 0.6); optional **heading hold** when stick centered and MPU ready |
+| **R2** | Forward; **L2** brake-then-reverse |
+| **Circle** | Speed LOW (50%) / HIGH |
+| **Square** | Steer LOW (50%) / HIGH |
+
+Manual ON + link OK overrides `/cmd_vel`. Link loss (**300 ms** failsafe), manual OFF, or controller disconnect → motors stop and ROS session drive resumes. Acks are sent on **every** packet (even while the micro-ROS agent is down) so the bridge learns Rover’s STA MAC and Wi-Fi channel. Flip steering in `platformio.ini` with `-DROVER_PS4_STEER_SIGN=-1.0f` if needed.
+
+`/rover/drive_diag` (1 Hz) also adds `ps4_link`, `ps4_man`, `ps4_age`, `ps4_ch`, `ps4_ack`; the TFT shows `PS4 MAN` when active. `bssid=` / `roams=` show the associated AP and app roam count. Pro S3 `/rover/tof/wifi` adds `bssid` last octet and roam count as elements 7–8.
 
 ### Wi-Fi roaming (same SSID, multiple APs)
 

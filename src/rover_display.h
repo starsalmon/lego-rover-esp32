@@ -62,6 +62,9 @@ struct RoverUiData {
   float l8[8] = {-1, -1, -1, -1, -1, -1, -1, -1};  // /rover/tof/l8_cols, col 0 = Rover's left (m)
   const char *boot_reason = nullptr;
   uint32_t boot_reason_until_ms = 0;
+  bool ps4_linked = false;
+  bool ps4_manual = false;
+  uint32_t ps4_pkt_age_ms = UINT32_MAX;
 };
 
 class RoverDisplay {

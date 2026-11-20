@@ -371,6 +371,18 @@ static void draw_stats(TFT_eSprite &g, const RoverUiData &data, int y0, uint32_t
   g.printf("Link %s", link_label(data.link_state));
   y += kLineH2;
 
+#if defined(ENABLE_PS4_ESPNOW)
+  if (data.ps4_manual || data.ps4_linked) {
+    g.setTextColor(data.ps4_manual ? TFT_MAGENTA : TFT_DARKGREY, TFT_BLACK);
+    g.setCursor(kTextX, y);
+    const uint32_t age =
+        data.ps4_pkt_age_ms == UINT32_MAX ? 9999U : data.ps4_pkt_age_ms;
+    g.printf("PS4 %s age=%lus", data.ps4_manual ? "MAN" : "pad",
+             (unsigned long)(age / 1000U));
+    y += kLineH2;
+  }
+#endif
+
   g.setTextColor(bat_colour(data), TFT_BLACK);
   g.setCursor(kTextX, y);
   g.printf("BAT %.1fV%s", data.bat_v, data.bat_critical ? "!" : (data.bat_low ? "?" : ""));
