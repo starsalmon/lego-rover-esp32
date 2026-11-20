@@ -31,11 +31,19 @@
 #endif
 
 #ifndef ROVER_PS4_TASK_PRIO
-#define ROVER_PS4_TASK_PRIO 6
+#define ROVER_PS4_TASK_PRIO 2
+#endif
+
+#ifndef ROVER_PS4_TASK_CORE
+#define ROVER_PS4_TASK_CORE 1
 #endif
 
 #ifndef ROVER_PS4_TASK_MS
 #define ROVER_PS4_TASK_MS 10
+#endif
+
+#ifndef ROVER_PS4_ACK_PER_TICK
+#define ROVER_PS4_ACK_PER_TICK 8
 #endif
 
 static const uint8_t kBridgeMac[6] = {FLEET_PS4_BRIDGE_MAC};
@@ -50,6 +58,8 @@ static portMUX_TYPE s_ack_mux = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE s_out_mux = portMUX_INITIALIZER_UNLOCKED;
 static RxSlot s_rx;
 static uint8_t s_peer_ch = 0;
+static bool s_peer_added = false;
+static wl_status_t s_wifi_last = WL_IDLE_STATUS;
 static bool s_espnow_on = false;
 static bool s_manual = false;
 static bool s_ctrl_ok = false;
@@ -124,7 +134,7 @@ static void sendAck(uint32_t seq) {
 }
 
 static void drainAcks() {
-  for (;;) {
+  for (uint32_t sent = 0; sent < ROVER_PS4_ACK_PER_TICK; sent++) {
     uint32_t seq = 0;
     bool got = false;
     portENTER_CRITICAL(&s_ack_mux);
@@ -182,30 +192,34 @@ static bool ensurePeer() {
     esp_now_register_recv_cb(onEspNowRecv);
     s_espnow_on = true;
   }
-  uint8_t ch = (uint8_t)WiFi.channel();
-  if (ch == 0) {
-    ch = s_peer_ch;
-  }
-  if (ch == 0) {
-    return s_peer_ch != 0;
-  }
-  if (s_peer_ch == ch) {
+  if (s_peer_added) {
+    s_peer_ch = (uint8_t)WiFi.channel();
     return true;
   }
-  if (s_peer_ch != 0) {
-    esp_now_del_peer(kBridgeMac);
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
   }
   esp_now_peer_info_t peer{};
   memcpy(peer.peer_addr, kBridgeMac, 6);
-  peer.channel = ch;
+  peer.channel = 0;
   peer.encrypt = false;
   peer.ifidx = WIFI_IF_STA;
   if (esp_now_add_peer(&peer) != ESP_OK) {
     return false;
   }
-  s_peer_ch = ch;
-  Serial.printf("PS4: ESP-NOW peer on WiFi ch %u\n", (unsigned)ch);
+  s_peer_ch = (uint8_t)WiFi.channel();
+  s_peer_added = true;
+  Serial.printf("PS4: ESP-NOW peer STA ch%u (follows AP)\n", (unsigned)s_peer_ch);
   return true;
+}
+
+static void dropPeerOnWifiDown() {
+  if (!s_peer_added) {
+    return;
+  }
+  esp_now_del_peer(kBridgeMac);
+  s_peer_added = false;
+  s_peer_ch = 0;
 }
 
 static bool ps4DebouncedEdge(uint32_t now_ms) {
@@ -237,11 +251,22 @@ static void publishCmd(const RoverPs4DriveOut& out, RoverPs4CmdKind kind) {
 }
 
 static void processOneTick(uint32_t now_ms) {
-  if (WiFi.status() == WL_CONNECTED) {
+  const wl_status_t wl = WiFi.status();
+  if (wl == WL_CONNECTED) {
+    if (s_wifi_last != WL_CONNECTED) {
+      s_peer_added = false;
+    }
     (void)ensurePeer();
+  } else if (s_wifi_last == WL_CONNECTED) {
+    dropPeerOnWifiDown();
   }
+  s_wifi_last = wl;
 
   drainAcks();
+
+  bool pkt_handled = false;
+  bool drive_edge = false;
+  RoverPs4CmdKind edge_kind = kPs4CmdTwist;
 
   for (;;) {
     FleetPs4TxPkt pkt;
@@ -283,37 +308,66 @@ static void processOneTick(uint32_t now_ms) {
       s_pending_rumble = true;
       Serial.printf("PS4: speed mode %s\n", s_speed_low ? "LOW" : "HIGH");
     }
+    pkt_handled = true;
   }
 
   const bool pkt_fresh =
       s_last_pkt_ms != 0 && (uint32_t)(now_ms - s_last_pkt_ms) < 2000;
-  rover_wifi_roam_set_suppress(s_manual || pkt_fresh);
+  rover_wifi_roam_set_suppress(s_manual && pkt_fresh);
 
   RoverPs4DriveOut out{};
 
   const bool ctrl_lost = s_manual && !s_ctrl_ok;
   const bool link_failsafe = fleetPs4LinkFailsafe(now_ms, s_last_pkt_ms, s_manual, s_ctrl_ok);
 
+  static bool prev_manual = false;
+  static bool prev_failsafe = false;
+  static bool prev_ctrl_lost = false;
+  static uint32_t s_last_drive_pub_ms = 0;
+
   if (s_manual && !ctrl_lost && !link_failsafe) {
     ps4TwistFromInputs(&out.linear_x, &out.angular_z);
     s_last_linear_x = out.linear_x;
     s_last_angular_z = out.angular_z;
     out.override_ros = true;
-    publishCmd(out, kPs4CmdTwist);
+    if (pkt_handled || !prev_manual ||
+        (uint32_t)(now_ms - s_last_drive_pub_ms) >= 200) {
+      drive_edge = true;
+      edge_kind = kPs4CmdTwist;
+    }
   } else if (s_manual && ctrl_lost) {
     s_throttle_now = 0.0f;
     out.override_ros = true;
     out.linear_x = 0.0f;
     out.angular_z = 0.0f;
-    publishCmd(out, kPs4CmdZero);
+    if (pkt_handled || !prev_ctrl_lost) {
+      drive_edge = true;
+      edge_kind = kPs4CmdZero;
+    }
   } else if (s_manual && link_failsafe) {
     s_throttle_now = 0.0f;
     out.failsafe = true;
     out.override_ros = false;
-    publishCmd(out, kPs4CmdFailsafe);
+    if (!prev_failsafe) {
+      drive_edge = true;
+      edge_kind = kPs4CmdFailsafe;
+    }
   } else {
     s_throttle_now = 0.0f;
+    if (prev_manual && !s_manual) {
+      drive_edge = true;
+      edge_kind = kPs4CmdFailsafe;
+    }
   }
+
+  if (drive_edge) {
+    publishCmd(out, edge_kind);
+    s_last_drive_pub_ms = now_ms;
+  }
+
+  prev_manual = s_manual;
+  prev_failsafe = link_failsafe;
+  prev_ctrl_lost = ctrl_lost;
 
   portENTER_CRITICAL(&s_out_mux);
   s_drive_out = out;
@@ -344,8 +398,9 @@ void rover_ps4_espnow_begin() {
   s_ack_r = s_ack_w = 0;
   if (s_task == nullptr) {
     xTaskCreatePinnedToCore(ps4Task, "ps4_espnow", ROVER_PS4_TASK_STACK, nullptr, ROVER_PS4_TASK_PRIO, &s_task,
-                            0);
-    Serial.println("PS4: ESP-NOW task core0 ~10ms");
+                            ROVER_PS4_TASK_CORE);
+    Serial.printf("PS4: ESP-NOW task core%d prio%d ~%dms\n", (int)ROVER_PS4_TASK_CORE,
+                  (int)ROVER_PS4_TASK_PRIO, (int)ROVER_PS4_TASK_MS);
   }
 }
 

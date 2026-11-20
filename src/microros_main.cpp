@@ -22,6 +22,7 @@
 #include <std_msgs/msg/float32.h>
 #include <std_msgs/msg/float32_multi_array.h>
 #include <std_msgs/msg/u_int32.h>
+#include <std_msgs/msg/int32.h>
 #include <std_msgs/msg/string.h>
 
 #include "drive.h"
@@ -39,10 +40,30 @@
 
 // TEST: wheel sensors direct on the sonar pins. Ring and sonar stay off.
 static volatile uint32_t direct_left_ticks = 0;
+static volatile int32_t direct_left_ticks_signed = 0;
+static volatile int8_t wheel_dir_l = 0;
+static volatile int8_t wheel_dir_r = 0;
 static bool g_encoder_isr_ok = false;
 static volatile uint32_t direct_right_ticks = 0;
-static void IRAM_ATTR direct_left_isr() { direct_left_ticks++; }
-static void IRAM_ATTR direct_right_isr() { direct_right_ticks++; }
+static volatile int32_t direct_right_ticks_signed = 0;
+static void IRAM_ATTR direct_left_isr() {
+  direct_left_ticks++;
+  const int8_t d = wheel_dir_l;
+  if (d > 0) {
+    direct_left_ticks_signed++;
+  } else if (d < 0) {
+    direct_left_ticks_signed--;
+  }
+}
+static void IRAM_ATTR direct_right_isr() {
+  direct_right_ticks++;
+  const int8_t d = wheel_dir_r;
+  if (d > 0) {
+    direct_right_ticks_signed++;
+  } else if (d < 0) {
+    direct_right_ticks_signed--;
+  }
+}
 
 #ifdef ROVER_TDISPLAY_S3
 #include "battery.h"
@@ -155,6 +176,8 @@ static rcl_publisher_t battery_pub;
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
 static rcl_publisher_t wheel_l_ticks_pub;
 static rcl_publisher_t wheel_r_ticks_pub;
+static rcl_publisher_t wheel_l_ticks_signed_pub;
+static rcl_publisher_t wheel_r_ticks_signed_pub;
 static rcl_publisher_t ir_detected_pub;
 static rcl_publisher_t ir_peer_pub;
 #endif
@@ -188,6 +211,8 @@ static std_msgs__msg__Float32 battery_msg;
 static std_msgs__msg__Float32 servo_angle_msg;
 static std_msgs__msg__UInt32 wheel_l_ticks_msg;
 static std_msgs__msg__UInt32 wheel_r_ticks_msg;
+static std_msgs__msg__Int32 wheel_l_ticks_signed_msg;
+static std_msgs__msg__Int32 wheel_r_ticks_signed_msg;
 static std_msgs__msg__Bool ir_detected_msg;
 static std_msgs__msg__UInt8 ir_peer_msg;
 static sensor_msgs__msg__Range sonar_range_msg;
@@ -218,6 +243,18 @@ static std_msgs__msg__Bool sonar_cal_sweep_msg;
 #endif
 
 static SmoothDrive drv;
+
+static void update_wheel_tick_dirs() {
+  const float cl = drv.cur_left();
+  const float cr = drv.cur_right();
+  if (fabsf(cl) > 0.04f) {
+    wheel_dir_l = (cl > 0.0f) ? 1 : -1;
+  }
+  if (fabsf(cr) > 0.04f) {
+    wheel_dir_r = (cr > 0.0f) ? 1 : -1;
+  }
+}
+
 static Mpu6050 mpu;
 static HeadingHold heading;
 static MotionDetect motion;
@@ -956,8 +993,12 @@ static void poll_mcp_ir(uint32_t now) {
       last_tick_pub = now;
       wheel_l_ticks_msg.data = direct_left_ticks;
       wheel_r_ticks_msg.data = direct_right_ticks;
+      wheel_l_ticks_signed_msg.data = direct_left_ticks_signed;
+      wheel_r_ticks_signed_msg.data = direct_right_ticks_signed;
       RCSOFTCHECK(rcl_publish(&wheel_l_ticks_pub, &wheel_l_ticks_msg, NULL));
       RCSOFTCHECK(rcl_publish(&wheel_r_ticks_pub, &wheel_r_ticks_msg, NULL));
+      RCSOFTCHECK(rcl_publish(&wheel_l_ticks_signed_pub, &wheel_l_ticks_signed_msg, NULL));
+      RCSOFTCHECK(rcl_publish(&wheel_r_ticks_signed_pub, &wheel_r_ticks_signed_msg, NULL));
       tick_pub_count++;
     }
   }
@@ -1043,6 +1084,12 @@ static bool create_entities() {
   RCCHECK(rclc_publisher_init_default(
     &wheel_r_ticks_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
     "rover/wheel/right_ticks"));
+  RCCHECK(rclc_publisher_init_default(
+    &wheel_l_ticks_signed_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+    "rover/wheel/left_ticks_signed"));
+  RCCHECK(rclc_publisher_init_default(
+    &wheel_r_ticks_signed_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+    "rover/wheel/right_ticks_signed"));
   RCCHECK(rclc_publisher_init_default(
     &ir_detected_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
     "rover/ir/detected"));
@@ -1261,6 +1308,8 @@ static void destroy_entities() {
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
   UROS_FINI(rcl_publisher_fini(&wheel_l_ticks_pub, &node));
   UROS_FINI(rcl_publisher_fini(&wheel_r_ticks_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&wheel_l_ticks_signed_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&wheel_r_ticks_signed_pub, &node));
 #endif
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_SONAR)
   UROS_FINI(rcl_publisher_fini(&sonar_range_pub, &node));
@@ -2228,6 +2277,7 @@ void setup() {
             drv.hard_stop();
           } else {
             drv.tick();
+            update_wheel_tick_dirs();
           }
           vTaskDelay(pdMS_TO_TICKS(5));
         }
