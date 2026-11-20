@@ -26,6 +26,10 @@
 #define ROVER_PS4_STEER_SIGN 1.0f
 #endif
 
+#ifndef ROVER_PS4_SWAP_LIN_ANG
+#define ROVER_PS4_SWAP_LIN_ANG 1
+#endif
+
 #ifndef ROVER_PS4_TASK_STACK
 #define ROVER_PS4_TASK_STACK 4096
 #endif
@@ -217,6 +221,24 @@ static float effectiveMaxThrottle() { return s_speed_low ? ROVER_PS4_MAX_LIN * 0
 
 static float effectiveMaxSteer() { return s_steer_low ? ROVER_PS4_MAX_ANG * 0.5f : ROVER_PS4_MAX_ANG; }
 
+static void ps4SetTwistFromInputs(float* linear_x, float* angular_z) {
+  if (!linear_x || !angular_z) {
+    return;
+  }
+#if ROVER_PS4_SWAP_LIN_ANG
+  *linear_x = fleetPs4SteerExpo(s_lx, effectiveMaxThrottle());
+  const float turn = fleetPs4ThrottleFromTriggers(s_l2, s_r2, effectiveMaxSteer(), s_throttle_now);
+  s_throttle_now = turn;
+  *angular_z = turn * ROVER_PS4_STEER_SIGN;
+#else
+  const auto sp = fleetPs4ScaleManual(s_l2, s_r2, s_lx, effectiveMaxThrottle(), effectiveMaxSteer(),
+                                       s_throttle_now);
+  s_throttle_now = sp.throttle;
+  *linear_x = sp.throttle;
+  *angular_z = sp.steering * ROVER_PS4_STEER_SIGN;
+#endif
+}
+
 static void applyMotors(const RoverPs4DriveOut& out) {
   if (!s_hooks.apply_twist || !s_hooks.motor_stop) {
     return;
@@ -288,12 +310,8 @@ static void processOneTick(uint32_t now_ms) {
   const bool link_failsafe = fleetPs4LinkFailsafe(now_ms, s_last_pkt_ms, s_manual, s_ctrl_ok);
 
   if (s_manual && !ctrl_lost && !link_failsafe) {
-    const auto sp = fleetPs4ScaleManual(s_l2, s_r2, s_lx, effectiveMaxThrottle(), effectiveMaxSteer(),
-                                         s_throttle_now);
-    s_throttle_now = sp.throttle;
     out.override_ros = true;
-    out.linear_x = sp.throttle;
-    out.angular_z = sp.steering * ROVER_PS4_STEER_SIGN;
+    ps4SetTwistFromInputs(&out.linear_x, &out.angular_z);
   } else if (s_manual && ctrl_lost) {
     s_throttle_now = 0.0f;
     out.override_ros = true;
@@ -359,6 +377,18 @@ bool rover_ps4_straight_eligible(float* linear_out) {
   if (fleetPs4LinkFailsafe(now, s_last_pkt_ms, s_manual, s_ctrl_ok)) {
     return false;
   }
+#if ROVER_PS4_SWAP_LIN_ANG
+  if (fabsf(s_throttle_now) > 0.02f) {
+    return false;
+  }
+  const float lin_fwd = fleetPs4SteerExpo(s_lx, effectiveMaxThrottle());
+  if (fabsf(lin_fwd) < 0.06f) {
+    return false;
+  }
+  if (linear_out) {
+    *linear_out = lin_fwd;
+  }
+#else
   if (fabsf(fleetPs4AxisNorm(s_lx)) > 0.02f) {
     return false;
   }
@@ -368,6 +398,7 @@ bool rover_ps4_straight_eligible(float* linear_out) {
   if (linear_out) {
     *linear_out = s_throttle_now;
   }
+#endif
   return true;
 }
 
