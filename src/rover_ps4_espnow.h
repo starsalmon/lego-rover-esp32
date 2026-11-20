@@ -22,15 +22,18 @@ struct RoverPs4LinkStatus {
   uint32_t rx_count = 0;
 };
 
-struct RoverPs4Hooks {
-  void (*apply_twist)(float linear_x, float angular_z);
-  void (*motor_stop)(void);
-  bool (*drive_cut)(void);
+/** Push PS4 twists into the same cmd_vel state the ROS subscriber uses. */
+enum RoverPs4CmdKind : uint8_t {
+  kPs4CmdTwist = 1,
+  kPs4CmdZero = 2,
+  kPs4CmdFailsafe = 3,
 };
+
+typedef void (*RoverPs4CmdSink)(float linear_x, float angular_z, RoverPs4CmdKind kind);
 
 #if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
 
-void rover_ps4_set_hooks(const RoverPs4Hooks* hooks);
+void rover_ps4_set_cmd_sink(RoverPs4CmdSink sink);
 void rover_ps4_espnow_begin();
 void rover_ps4_espnow_tick(uint32_t now_ms);
 RoverPs4DriveOut rover_ps4_espnow_poll(uint32_t now_ms);
@@ -40,7 +43,7 @@ void rover_ps4_link_status(RoverPs4LinkStatus* out);
 
 #else
 
-inline void rover_ps4_set_hooks(const RoverPs4Hooks*) {}
+inline void rover_ps4_set_cmd_sink(RoverPs4CmdSink) {}
 inline void rover_ps4_espnow_begin() {}
 inline void rover_ps4_espnow_tick(uint32_t) {}
 inline RoverPs4DriveOut rover_ps4_espnow_poll(uint32_t) { return {}; }

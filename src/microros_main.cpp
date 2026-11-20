@@ -288,6 +288,9 @@ static uint32_t boot_reason_until_ms = 0;
 
 static float last_lin = 0, last_ang = 0;
 static uint32_t last_drive_ms = 0;
+#if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
+static portMUX_TYPE cmd_twist_mux = portMUX_INITIALIZER_UNLOCKED;
+#endif
 static uint32_t last_uros_ping_ms = 0;
 #if defined(ROVER_VL53L) || defined(ROVER_VL53L8)
 static TaskHandle_t tof_task_handle = nullptr;
@@ -1298,60 +1301,57 @@ static void on_session_lost() {
 }
 
 #if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
-static void ps4_mix_set_target(float v, float turn, float trim_out) {
-  float l, r;
-  constexpr float STEER_DEAD = 0.02f;
-
-  if (fabsf(turn) < STEER_DEAD) {
-    l = v + trim_out;
-    r = v - trim_out;
-  } else if (fabsf(v) < 0.04f && fabsf(turn) >= STEER_DEAD) {
-    const float spin = fminf(fabsf(turn), 0.10f);
-    turn = (turn > 0.0f) ? spin : -spin;
-    l = -turn;
-    r = turn;
-  } else {
-    float max_turn = fminf(0.06f, fabsf(v) * 0.45f);
-    if (max_turn < 0.03f) {
-      max_turn = 0.03f;
-    }
-    if (fabsf(turn) > max_turn) {
-      turn = (turn > 0.0f) ? max_turn : -max_turn;
-    }
-    l = v - turn;
-    r = v + turn;
-  }
-
-  const float peak = fmaxf(fabsf(l), fabsf(r));
-  if (peak > 1.0f) {
-    l /= peak;
-    r /= peak;
-  }
-  l = constrain(l, -1.0f, 1.0f);
-  r = constrain(r, -1.0f, 1.0f);
-  drv.set_target(l, r);
+static void rover_store_cmd_twist(float lin, float ang, uint32_t ms) {
+  portENTER_CRITICAL(&cmd_twist_mux);
+  last_lin = lin;
+  last_ang = ang;
+  last_drive_ms = ms;
+  portEXIT_CRITICAL(&cmd_twist_mux);
 }
 
-static void ps4_motor_stop_hook() { drv.set_target(0.0f, 0.0f); }
+static void rover_clear_cmd_twist() {
+  portENTER_CRITICAL(&cmd_twist_mux);
+  last_lin = 0.0f;
+  last_ang = 0.0f;
+  last_drive_ms = 0;
+  portEXIT_CRITICAL(&cmd_twist_mux);
+}
 
-static bool ps4_drive_cut_hook() {
+static void rover_read_cmd_twist(float* lin, float* ang, uint32_t* ms) {
+  portENTER_CRITICAL(&cmd_twist_mux);
+  if (lin) {
+    *lin = last_lin;
+  }
+  if (ang) {
+    *ang = last_ang;
+  }
+  if (ms) {
+    *ms = last_drive_ms;
+  }
+  portEXIT_CRITICAL(&cmd_twist_mux);
+}
+
+static void ps4_cmd_sink(float linear_x, float angular_z, RoverPs4CmdKind kind) {
   if (drive_blocked()) {
-    return true;
-  }
-#if defined(ENABLE_OTA)
-  if (ota.busy()) {
-    return true;
-  }
-#endif
-  return false;
-}
-
-static void ps4_apply_twist_hook(float v, float turn) {
-  if (ps4_drive_cut_hook()) {
-    ps4_motor_stop_hook();
+  // Still accept zeros so manual stop can release the wheels.
+    if (kind != kPs4CmdTwist) {
+      rover_store_cmd_twist(0.0f, 0.0f, millis());
+    }
     return;
   }
-  ps4_mix_set_target(v, turn, 0.0f);
+  switch (kind) {
+  case kPs4CmdTwist:
+    rover_store_cmd_twist(linear_x, angular_z, millis());
+    break;
+  case kPs4CmdZero:
+    rover_store_cmd_twist(0.0f, 0.0f, millis());
+    break;
+  case kPs4CmdFailsafe:
+    rover_clear_cmd_twist();
+    break;
+  default:
+    break;
+  }
 }
 #endif
 
@@ -1362,8 +1362,10 @@ static void apply_drive(float yaw_rate, float dt) {
   }
 
   constexpr uint32_t CMD_TIMEOUT_MS = 400;
-  const bool cmd_fresh = (millis() - last_drive_ms) <= CMD_TIMEOUT_MS;
-  bool ps4_override = false;
+  uint32_t cmd_ms = 0;
+  float v = 0.0f;
+  float turn = 0.0f;
+  bool ps4_cmd_active = false;
 #if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
   const RoverPs4DriveOut ps4 = rover_ps4_espnow_poll(millis());
   if (ps4.failsafe) {
@@ -1371,46 +1373,34 @@ static void apply_drive(float yaw_rate, float dt) {
       heading.disarm();
       heading_unlock();
     }
-  } else if (ps4.override_ros) {
-    ps4_override = true;
+  } else {
+    ps4_cmd_active = ps4.override_ros;
   }
-#endif
-
-  if (!ps4_override) {
-#if defined(ROVER_SONAR)
-    if (!sonar_drive_override && (!cmd_fresh || !pi_session_sub_value)) {
+  rover_read_cmd_twist(&v, &turn, &cmd_ms);
 #else
-    if (!cmd_fresh || !pi_session_sub_value) {
+  cmd_ms = last_drive_ms;
+  v = last_lin;
+  turn = last_ang;
 #endif
-      drv.set_target(0.0f, 0.0f);
-      return;
-    }
-  }
+  const bool cmd_fresh = cmd_ms != 0 && (millis() - cmd_ms) <= CMD_TIMEOUT_MS;
 
 #if defined(ROVER_SONAR)
-  if (!ps4_override && sonar_scan_hold()) {
+  if (!sonar_drive_override && (!cmd_fresh || (!pi_session_sub_value && !ps4_cmd_active))) {
+#else
+  if (!cmd_fresh || (!pi_session_sub_value && !ps4_cmd_active)) {
+#endif
     drv.set_target(0.0f, 0.0f);
     return;
   }
-#endif
 
-  float v;
-  float turn;
-#if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
-  if (ps4_override) {
-    v = ps4.linear_x;
-    turn = ps4.angular_z;
-  } else
-#endif
 #if defined(ROVER_SONAR)
-  {
+  if (!ps4_cmd_active && sonar_scan_hold()) {
+    drv.set_target(0.0f, 0.0f);
+    return;
+  }
+  if (sonar_drive_override) {
     v = sonar_drive_lin;
     turn = sonar_drive_ang;
-  }
-#else
-  {
-    v = last_lin;
-    turn = last_ang;
   }
 #endif
   float trim = 0;
@@ -1476,9 +1466,11 @@ static void apply_drive(float yaw_rate, float dt) {
 
   constexpr float STEER_DEAD = 0.02f;
 
-  // Cruise: forward dominates, steer is a nudge. A real pivot (almost no
-  // forward, a real turn) is allowed — this chassis can rotate on the spot —
-  // but a hallway command must not collapse into one.
+  // cmd_vel / cmd_vel-shaped PS4 input -> wheel targets (CMD_VEL_CROSS_FIX=0):
+  //   v     = linear.x  (m/s, signed forward/back)
+  //   turn  = angular.z (rad/s, positive = left per brain + REP-103)
+  // Differential mix (wheeled, not tank-steered): positive turn slows left, speeds right.
+  // MOTOR_INVERT_* runs later in SmoothDrive::_apply (GPIO DIR), not here.
   if (fabsf(turn) < STEER_DEAD) {
     l = v + trim_out;
     r = v - trim_out;
@@ -1510,30 +1502,41 @@ static void apply_drive(float yaw_rate, float dt) {
   drv.set_target(l, r);
 }
 
+static void ingest_cmd_vel_twist(float lin, float ang, bool from_ps4) {
+  if (drive_blocked()) {
+    if (!from_ps4) {
+      diag_cmd_drop++;
+    }
+    return;
+  }
+  if (!from_ps4 && !pi_session_sub_value) {
+    diag_cmd_drop++;
+    return;
+  }
+#if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
+  rover_store_cmd_twist(lin, ang, millis());
+#else
+  last_lin = lin;
+  last_ang = ang;
+  last_drive_ms = millis();
+#endif
+  if (!from_ps4) {
+    last_pi_traffic_ms = millis();
+    bridge_live_latched = true;
+  }
+}
+
 void on_cmd(const void *msgin) {
   diag_cmd_count++;
-  if (drive_blocked()) {
-    diag_cmd_drop++;
-    return;
-  }
-  if (!pi_session_sub_value) {
-    diag_cmd_drop++;
-    return;
-  }
   const auto *msg = (const geometry_msgs__msg__Twist *)msgin;
 #ifndef CMD_VEL_CROSS_FIX
 #define CMD_VEL_CROSS_FIX 0
 #endif
 #if CMD_VEL_CROSS_FIX
-  last_lin = msg->angular.z;
-  last_ang = msg->linear.x;
+  ingest_cmd_vel_twist(static_cast<float>(msg->angular.z), static_cast<float>(msg->linear.x), false);
 #else
-  last_lin = msg->linear.x;
-  last_ang = msg->angular.z;
+  ingest_cmd_vel_twist(static_cast<float>(msg->linear.x), static_cast<float>(msg->angular.z), false);
 #endif
-  last_drive_ms = millis();
-  last_pi_traffic_ms = millis();
-  bridge_live_latched = true;
 }
 
 static void handle_ros_state() {
@@ -2352,9 +2355,7 @@ void setup() {
   ota.beginConnected("rover-esp");
 #endif
 #if defined(ENABLE_PS4_ESPNOW)
-  static const RoverPs4Hooks kPs4Hooks = {ps4_apply_twist_hook, ps4_motor_stop_hook,
-                                          ps4_drive_cut_hook};
-  rover_ps4_set_hooks(&kPs4Hooks);
+  rover_ps4_set_cmd_sink(ps4_cmd_sink);
   rover_ps4_espnow_begin();
 #endif
 #else

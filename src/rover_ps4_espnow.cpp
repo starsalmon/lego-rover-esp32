@@ -26,10 +26,6 @@
 #define ROVER_PS4_STEER_SIGN 1.0f
 #endif
 
-#ifndef ROVER_PS4_SWAP_LIN_ANG
-#define ROVER_PS4_SWAP_LIN_ANG 1
-#endif
-
 #ifndef ROVER_PS4_TASK_STACK
 #define ROVER_PS4_TASK_STACK 4096
 #endif
@@ -69,10 +65,12 @@ static uint16_t s_buttons_prev = 0;
 static bool s_opt_prev = false;
 static RoverPs4DriveOut s_drive_out;
 static float s_throttle_now = 0.0f;
+static float s_last_linear_x = 0.0f;
+static float s_last_angular_z = 0.0f;
 static uint32_t s_ack_tx = 0;
 static volatile uint32_t s_rx_count = 0;
 static TaskHandle_t s_task = nullptr;
-static RoverPs4Hooks s_hooks = {};
+static RoverPs4CmdSink s_cmd_sink = nullptr;
 
 static constexpr size_t kAckRingLen = 16;
 static volatile uint32_t s_ack_ring[kAckRingLen];
@@ -221,37 +219,20 @@ static float effectiveMaxThrottle() { return s_speed_low ? ROVER_PS4_MAX_LIN * 0
 
 static float effectiveMaxSteer() { return s_steer_low ? ROVER_PS4_MAX_ANG * 0.5f : ROVER_PS4_MAX_ANG; }
 
-static void ps4SetTwistFromInputs(float* linear_x, float* angular_z) {
-  if (!linear_x || !angular_z) {
-    return;
-  }
-#if ROVER_PS4_SWAP_LIN_ANG
-  *linear_x = fleetPs4SteerExpo(s_lx, effectiveMaxThrottle());
-  const float turn = fleetPs4ThrottleFromTriggers(s_l2, s_r2, effectiveMaxSteer(), s_throttle_now);
-  s_throttle_now = turn;
-  *angular_z = turn * ROVER_PS4_STEER_SIGN;
-#else
+/** Standard REP-103-style Twist: R2/L2 -> linear.x, stick X -> angular.z (fleet scaling). */
+static void ps4TwistFromInputs(float* linear_x, float* angular_z) {
   const auto sp = fleetPs4ScaleManual(s_l2, s_r2, s_lx, effectiveMaxThrottle(), effectiveMaxSteer(),
                                        s_throttle_now);
   s_throttle_now = sp.throttle;
   *linear_x = sp.throttle;
   *angular_z = sp.steering * ROVER_PS4_STEER_SIGN;
-#endif
 }
 
-static void applyMotors(const RoverPs4DriveOut& out) {
-  if (!s_hooks.apply_twist || !s_hooks.motor_stop) {
+static void publishCmd(const RoverPs4DriveOut& out, RoverPs4CmdKind kind) {
+  if (!s_cmd_sink) {
     return;
   }
-  if (s_hooks.drive_cut && s_hooks.drive_cut()) {
-    s_hooks.motor_stop();
-    return;
-  }
-  if (out.override_ros) {
-    s_hooks.apply_twist(out.linear_x, out.angular_z);
-  } else if (out.failsafe) {
-    s_hooks.motor_stop();
-  }
+  s_cmd_sink(out.linear_x, out.angular_z, kind);
 }
 
 static void processOneTick(uint32_t now_ms) {
@@ -310,17 +291,22 @@ static void processOneTick(uint32_t now_ms) {
   const bool link_failsafe = fleetPs4LinkFailsafe(now_ms, s_last_pkt_ms, s_manual, s_ctrl_ok);
 
   if (s_manual && !ctrl_lost && !link_failsafe) {
+    ps4TwistFromInputs(&out.linear_x, &out.angular_z);
+    s_last_linear_x = out.linear_x;
+    s_last_angular_z = out.angular_z;
     out.override_ros = true;
-    ps4SetTwistFromInputs(&out.linear_x, &out.angular_z);
+    publishCmd(out, kPs4CmdTwist);
   } else if (s_manual && ctrl_lost) {
     s_throttle_now = 0.0f;
     out.override_ros = true;
     out.linear_x = 0.0f;
     out.angular_z = 0.0f;
+    publishCmd(out, kPs4CmdZero);
   } else if (s_manual && link_failsafe) {
     s_throttle_now = 0.0f;
     out.failsafe = true;
     out.override_ros = false;
+    publishCmd(out, kPs4CmdFailsafe);
   } else {
     s_throttle_now = 0.0f;
   }
@@ -328,10 +314,6 @@ static void processOneTick(uint32_t now_ms) {
   portENTER_CRITICAL(&s_out_mux);
   s_drive_out = out;
   portEXIT_CRITICAL(&s_out_mux);
-
-  if (s_manual) {
-    applyMotors(out);
-  }
 }
 
 static void ps4Task(void* arg) {
@@ -345,13 +327,7 @@ static void ps4Task(void* arg) {
   }
 }
 
-void rover_ps4_set_hooks(const RoverPs4Hooks* hooks) {
-  if (hooks) {
-    s_hooks = *hooks;
-  } else {
-    s_hooks = {};
-  }
-}
+void rover_ps4_set_cmd_sink(RoverPs4CmdSink sink) { s_cmd_sink = sink; }
 
 void rover_ps4_espnow_begin() {
   s_manual = false;
@@ -377,28 +353,15 @@ bool rover_ps4_straight_eligible(float* linear_out) {
   if (fleetPs4LinkFailsafe(now, s_last_pkt_ms, s_manual, s_ctrl_ok)) {
     return false;
   }
-#if ROVER_PS4_SWAP_LIN_ANG
-  if (fabsf(s_throttle_now) > 0.02f) {
+  if (fabsf(s_last_angular_z) > 0.02f) {
     return false;
   }
-  const float lin_fwd = fleetPs4SteerExpo(s_lx, effectiveMaxThrottle());
-  if (fabsf(lin_fwd) < 0.06f) {
-    return false;
-  }
-  if (linear_out) {
-    *linear_out = lin_fwd;
-  }
-#else
-  if (fabsf(fleetPs4AxisNorm(s_lx)) > 0.02f) {
-    return false;
-  }
-  if (fabsf(s_throttle_now) < 0.06f) {
+  if (fabsf(s_last_linear_x) < 0.06f) {
     return false;
   }
   if (linear_out) {
-    *linear_out = s_throttle_now;
+    *linear_out = s_last_linear_x;
   }
-#endif
   return true;
 }
 
@@ -420,7 +383,6 @@ void rover_ps4_link_status(RoverPs4LinkStatus* out) {
 }
 
 void rover_ps4_espnow_tick(uint32_t now_ms) {
-  // Legacy: task owns the link; loop may call this as a no-op fallback.
   (void)now_ms;
 }
 
