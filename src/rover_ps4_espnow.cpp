@@ -70,24 +70,25 @@ static float s_last_angular_z = 0.0f;
 static uint32_t s_ack_tx = 0;
 static volatile uint32_t s_rx_count = 0;
 static TaskHandle_t s_task = nullptr;
-static RoverPs4CmdSink s_cmd_sink = nullptr;
+static RoverPs4DriveFn s_drive_fn = nullptr;
 
-static constexpr size_t kAckRingLen = 16;
+static constexpr size_t kAckRingLen = 64;
 static volatile uint32_t s_ack_ring[kAckRingLen];
 static volatile uint8_t s_ack_r = 0;
 static volatile uint8_t s_ack_w = 0;
+static volatile uint32_t s_ack_drop = 0;
 
 static bool macEq(const uint8_t* a, const uint8_t* b) { return memcmp(a, b, 6) == 0; }
 
-static bool pushAckSeqLocked(uint32_t seq) {
+static void pushAckSeqLocked(uint32_t seq) {
   const uint8_t w = s_ack_w;
   const uint8_t n = static_cast<uint8_t>((w + 1) % kAckRingLen);
   if (n == s_ack_r) {
-    return false;
+    s_ack_r = static_cast<uint8_t>((s_ack_r + 1) % kAckRingLen);
+    s_ack_drop++;
   }
   s_ack_ring[w] = seq;
   s_ack_w = n;
-  return true;
 }
 
 static bool popAckSeqLocked(uint32_t* seq_out) {
@@ -229,10 +230,10 @@ static void ps4TwistFromInputs(float* linear_x, float* angular_z) {
 }
 
 static void publishCmd(const RoverPs4DriveOut& out, RoverPs4CmdKind kind) {
-  if (!s_cmd_sink) {
+  if (!s_drive_fn) {
     return;
   }
-  s_cmd_sink(out.linear_x, out.angular_z, kind);
+  s_drive_fn(out.linear_x, out.angular_z, kind);
 }
 
 static void processOneTick(uint32_t now_ms) {
@@ -242,17 +243,20 @@ static void processOneTick(uint32_t now_ms) {
 
   drainAcks();
 
-  FleetPs4TxPkt pkt;
-  bool got = false;
-  portENTER_CRITICAL(&s_rx_mux);
-  if (s_rx.fresh) {
-    pkt = s_rx.pkt;
-    s_rx.fresh = false;
-    got = true;
-  }
-  portEXIT_CRITICAL(&s_rx_mux);
+  for (;;) {
+    FleetPs4TxPkt pkt;
+    bool got = false;
+    portENTER_CRITICAL(&s_rx_mux);
+    if (s_rx.fresh) {
+      pkt = s_rx.pkt;
+      s_rx.fresh = false;
+      got = true;
+    }
+    portEXIT_CRITICAL(&s_rx_mux);
+    if (!got) {
+      break;
+    }
 
-  if (got) {
     s_last_pkt_ms = now_ms;
     s_ctrl_ok = (pkt.flags & FLEET_PS4_FLAG_CTRL_OK) != 0;
     s_lx = pkt.lx;
@@ -314,6 +318,8 @@ static void processOneTick(uint32_t now_ms) {
   portENTER_CRITICAL(&s_out_mux);
   s_drive_out = out;
   portEXIT_CRITICAL(&s_out_mux);
+
+  drainAcks();
 }
 
 static void ps4Task(void* arg) {
@@ -327,7 +333,7 @@ static void ps4Task(void* arg) {
   }
 }
 
-void rover_ps4_set_cmd_sink(RoverPs4CmdSink sink) { s_cmd_sink = sink; }
+void rover_ps4_set_drive_fn(RoverPs4DriveFn fn) { s_drive_fn = fn; }
 
 void rover_ps4_espnow_begin() {
   s_manual = false;
@@ -380,6 +386,7 @@ void rover_ps4_link_status(RoverPs4LinkStatus* out) {
   out->last_pkt_age_ms = s_last_pkt_ms ? (uint32_t)(now - s_last_pkt_ms) : UINT32_MAX;
   out->ack_tx = s_ack_tx;
   out->rx_count = s_rx_count;
+  out->ack_drop = s_ack_drop;
 }
 
 void rover_ps4_espnow_tick(uint32_t now_ms) {
