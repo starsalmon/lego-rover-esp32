@@ -697,33 +697,33 @@ bool create_entities() {
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
   RCCHECK(rclc_node_init_default(&node, "lego_rover_tof", "", &support));
 
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_left_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/tof/left"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/tof/right"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_front_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/tof/front"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_front_left_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/tof/front_left"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_front_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/tof/front_right"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_l8_cols_pub, &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
       "rover/tof/l8_cols"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_l8_grid_pub, &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt16MultiArray),
       "rover/tof/l8_grid"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &sonar_range_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/sonar/range"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_status_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
       "rover/tof/status"));
   RCCHECK(rclc_publisher_init_default(
@@ -749,6 +749,16 @@ bool create_entities() {
   RCCHECK(rclc_publisher_init_default(
       &ir_detected_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
       "rover/tof/ir_rx_edges"));
+  // Must stay RELIABLE. micro-ROS best-effort output is a single MTU-sized
+  // buffer with no XRCE fragmentation (rmw types.h:
+  // output_best_effort_stream_buffer[MTU]; send is one UDP datagram).
+  // A 4 kB LaserScan cannot fit in MTU 1400, and enlarging the BE buffer
+  // would be one >1460-byte UDP write, which WiFiUDP splits badly.
+  // Reliable uses history 8 * 1400 and fragments into 3 datagrams.
+  // 2026-11-21: a BE scan build published 0/3287 (lidar still 10 Hz UART).
+  // The other high-rate ToF publishers are BEST_EFFORT (they fit in one MTU)
+  // so they no longer crowd the reliable stream and stall this confirm.
+  // Skip-on-fail below is unchanged.
   RCCHECK(rclc_publisher_init_default(
       &scan_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, LaserScan),
       "rover/scan"));
@@ -766,7 +776,7 @@ bool create_entities() {
     scan_ranges[i] = std::numeric_limits<float>::quiet_NaN();
     scan_intensities[i] = std::numeric_limits<float>::quiet_NaN();
   }
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &lidar_diag_pub, &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
       "rover/tof/lidar"));
