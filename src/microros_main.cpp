@@ -1297,6 +1297,64 @@ static void on_session_lost() {
   Serial.println("micro-ROS agent lost — waiting to reconnect...");
 }
 
+#if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
+static void ps4_mix_set_target(float v, float turn, float trim_out) {
+  float l, r;
+  constexpr float STEER_DEAD = 0.02f;
+
+  if (fabsf(turn) < STEER_DEAD) {
+    l = v + trim_out;
+    r = v - trim_out;
+  } else if (fabsf(v) < 0.04f && fabsf(turn) >= STEER_DEAD) {
+    const float spin = fminf(fabsf(turn), 0.10f);
+    turn = (turn > 0.0f) ? spin : -spin;
+    l = -turn;
+    r = turn;
+  } else {
+    float max_turn = fminf(0.06f, fabsf(v) * 0.45f);
+    if (max_turn < 0.03f) {
+      max_turn = 0.03f;
+    }
+    if (fabsf(turn) > max_turn) {
+      turn = (turn > 0.0f) ? max_turn : -max_turn;
+    }
+    l = v - turn;
+    r = v + turn;
+  }
+
+  const float peak = fmaxf(fabsf(l), fabsf(r));
+  if (peak > 1.0f) {
+    l /= peak;
+    r /= peak;
+  }
+  l = constrain(l, -1.0f, 1.0f);
+  r = constrain(r, -1.0f, 1.0f);
+  drv.set_target(l, r);
+}
+
+static void ps4_motor_stop_hook() { drv.set_target(0.0f, 0.0f); }
+
+static bool ps4_drive_cut_hook() {
+  if (drive_blocked()) {
+    return true;
+  }
+#if defined(ENABLE_OTA)
+  if (ota.busy()) {
+    return true;
+  }
+#endif
+  return false;
+}
+
+static void ps4_apply_twist_hook(float v, float turn) {
+  if (ps4_drive_cut_hook()) {
+    ps4_motor_stop_hook();
+    return;
+  }
+  ps4_mix_set_target(v, turn, 0.0f);
+}
+#endif
+
 static void apply_drive(float yaw_rate, float dt) {
   if (drive_blocked()) {
     force_stop(nullptr);
@@ -2294,6 +2352,9 @@ void setup() {
   ota.beginConnected("rover-esp");
 #endif
 #if defined(ENABLE_PS4_ESPNOW)
+  static const RoverPs4Hooks kPs4Hooks = {ps4_apply_twist_hook, ps4_motor_stop_hook,
+                                          ps4_drive_cut_hook};
+  rover_ps4_set_hooks(&kPs4Hooks);
   rover_ps4_espnow_begin();
 #endif
 #else
@@ -2308,9 +2369,6 @@ void setup() {
 void loop() {
   rover_batt_http_tick(battery.voltage());
   const uint32_t now = millis();
-#if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
-  rover_ps4_espnow_tick(now);
-#endif
   static uint32_t prev = now;
   const float dt = (now - prev) / 1000.0f;
   prev = now;
@@ -2325,9 +2383,6 @@ void loop() {
   if (ota.busy()) {
     // Flash writes + micro-ROS/display in the same loop starve ArduinoOTA.
     while (ota.busy()) {
-#if defined(ENABLE_PS4_ESPNOW)
-      rover_ps4_espnow_tick(millis());
-#endif
       spin_ros_input();
       ota.tick();
       yield();
@@ -2570,10 +2625,10 @@ void loop() {
         rover_ps4_link_status(&ps4s);
         const int p4 = snprintf(
             drive_diag_buf + n, sizeof(drive_diag_buf) - n,
-            " ps4_link=%d ps4_man=%d ps4_age=%lu ps4_ch=%u ps4_ack=%lu",
+            " ps4_link=%d ps4_man=%d ps4_age=%lu ps4_ch=%u ps4_rx=%lu ps4_ack=%lu",
             (int)ps4s.linked, (int)ps4s.manual,
             ps4s.last_pkt_age_ms == UINT32_MAX ? 0UL : (unsigned long)ps4s.last_pkt_age_ms,
-            (unsigned)ps4s.channel, (unsigned long)ps4s.ack_tx);
+            (unsigned)ps4s.channel, (unsigned long)ps4s.rx_count, (unsigned long)ps4s.ack_tx);
         if (p4 > 0) n += p4;
       }
 #endif
@@ -2604,9 +2659,10 @@ void loop() {
     {
       RoverPs4LinkStatus ps4s{};
       rover_ps4_link_status(&ps4s);
-      Serial.printf(" ps4=%d man=%d age=%lu", (int)ps4s.linked, (int)ps4s.manual,
+      Serial.printf(" ps4=%d man=%d age=%lu rx=%lu ack=%lu", (int)ps4s.linked, (int)ps4s.manual,
                     ps4s.last_pkt_age_ms == UINT32_MAX ? 9999UL
-                                                         : (unsigned long)ps4s.last_pkt_age_ms);
+                                                         : (unsigned long)ps4s.last_pkt_age_ms,
+                    (unsigned long)ps4s.rx_count, (unsigned long)ps4s.ack_tx);
     }
 #endif
 #endif
