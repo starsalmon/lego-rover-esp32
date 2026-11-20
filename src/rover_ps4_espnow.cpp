@@ -75,11 +75,12 @@ static void sendAck(uint32_t seq) {
   }
 }
 
-static void IRAM_ATTR onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
-  if (!info || len != (int)sizeof(FleetPs4TxPkt)) {
+// Arduino-ESP32 2.x (IDF 4.4): recv_cb(mac, data, len). 3.x+: esp_now_recv_info_t*.
+static void IRAM_ATTR ingestEspNowRx(const uint8_t* mac, const uint8_t* data, int len) {
+  if (!mac || !data || len != (int)sizeof(FleetPs4TxPkt)) {
     return;
   }
-  if (!macEq(info->src_addr, kBridgeMac)) {
+  if (!macEq(mac, kBridgeMac)) {
     return;
   }
   FleetPs4TxPkt pkt;
@@ -93,6 +94,19 @@ static void IRAM_ATTR onEspNowRecv(const esp_now_recv_info_t* info, const uint8_
   s_pending_ack_seq = pkt.seq;
   portEXIT_CRITICAL_ISR(&s_rx_mux);
 }
+
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+static void IRAM_ATTR onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
+  if (!info) {
+    return;
+  }
+  ingestEspNowRx(info->src_addr, data, len);
+}
+#else
+static void IRAM_ATTR onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
+  ingestEspNowRx(mac, data, len);
+}
+#endif
 
 static bool ensurePeer() {
   if (!s_espnow_on) {
