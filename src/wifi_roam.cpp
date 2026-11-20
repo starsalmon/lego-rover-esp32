@@ -16,6 +16,7 @@ const char* g_pass = "";
 uint32_t g_roam_count = 0;
 uint32_t g_last_check_ms = 0;
 uint32_t g_last_roam_ms = 0;
+bool g_roam_suppress = false;
 
 enum class ScanPhase : uint8_t { kIdle, kRunning };
 ScanPhase g_scan = ScanPhase::kIdle;
@@ -135,8 +136,10 @@ void rover_wifi_roam_init(const char* ssid, const char* pass) {
   g_last_check_ms = millis();
 }
 
+void rover_wifi_roam_set_suppress(bool suppress) { g_roam_suppress = suppress; }
+
 void rover_wifi_roam_tick(uint32_t now_ms) {
-  if (!g_ssid[0]) {
+  if (!g_ssid[0] || g_roam_suppress) {
     return;
   }
 

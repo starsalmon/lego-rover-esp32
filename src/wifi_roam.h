@@ -19,6 +19,8 @@
 void rover_wifi_sta_common_setup(int tx_power_wifi_enum);
 /** Call once after WiFi.mode(WIFI_STA) with the rover SSID credentials. */
 void rover_wifi_roam_init(const char* ssid, const char* pass);
+/** Block app-level roam scans/roams (e.g. fleet PS4 link active). */
+void rover_wifi_roam_set_suppress(bool suppress);
 /** Non-blocking periodic roam check — call from main loop. */
 void rover_wifi_roam_tick(uint32_t now_ms);
 uint32_t rover_wifi_roam_count();

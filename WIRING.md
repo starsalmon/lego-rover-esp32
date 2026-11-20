@@ -73,7 +73,7 @@ R1 **200 kΩ** (VM → GPIO16), R2 **100 kΩ** (GPIO16 → GND). Cal `BAT_ADC_SC
 | **11** | RF: HIGH = u.FL |
 | **17** / **18** | LDO2 enable / onboard RGB status | WS2812×1; brief white at boot, then Wi-Fi / micro-ROS colours |
 
-Publishes `/rover/tof/*`, `/rover/sonar/range`, `/rover/scan`, `/rover/tof/lidar` diagnostics.
+Publishes `/rover/tof/*`, `/rover/sonar/range`, `/rover/scan_slice` (rebuilt into `/rover/scan` on the NUC), `/rover/tof/lidar` diagnostics.
 
 ## STL-19P
 

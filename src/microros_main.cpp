@@ -22,6 +22,7 @@
 #include <std_msgs/msg/float32.h>
 #include <std_msgs/msg/float32_multi_array.h>
 #include <std_msgs/msg/u_int32.h>
+#include <std_msgs/msg/int32.h>
 #include <std_msgs/msg/string.h>
 
 #include "drive.h"
@@ -32,13 +33,37 @@
 #include "rover_board_power.h"
 #include "status_led.h"
 #include "rover_diag.h"
+#if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
+#include "rover_ps4_espnow.h"
+#endif
+#include "rover_cmd_mix.h"
 
 // TEST: wheel sensors direct on the sonar pins. Ring and sonar stay off.
 static volatile uint32_t direct_left_ticks = 0;
+static volatile int32_t direct_left_ticks_signed = 0;
+static volatile int8_t wheel_dir_l = 0;
+static volatile int8_t wheel_dir_r = 0;
 static bool g_encoder_isr_ok = false;
 static volatile uint32_t direct_right_ticks = 0;
-static void IRAM_ATTR direct_left_isr() { direct_left_ticks++; }
-static void IRAM_ATTR direct_right_isr() { direct_right_ticks++; }
+static volatile int32_t direct_right_ticks_signed = 0;
+static void IRAM_ATTR direct_left_isr() {
+  direct_left_ticks++;
+  const int8_t d = wheel_dir_l;
+  if (d > 0) {
+    direct_left_ticks_signed++;
+  } else if (d < 0) {
+    direct_left_ticks_signed--;
+  }
+}
+static void IRAM_ATTR direct_right_isr() {
+  direct_right_ticks++;
+  const int8_t d = wheel_dir_r;
+  if (d > 0) {
+    direct_right_ticks_signed++;
+  } else if (d < 0) {
+    direct_right_ticks_signed--;
+  }
+}
 
 #ifdef ROVER_TDISPLAY_S3
 #include "battery.h"
@@ -151,6 +176,8 @@ static rcl_publisher_t battery_pub;
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
 static rcl_publisher_t wheel_l_ticks_pub;
 static rcl_publisher_t wheel_r_ticks_pub;
+static rcl_publisher_t wheel_l_ticks_signed_pub;
+static rcl_publisher_t wheel_r_ticks_signed_pub;
 static rcl_publisher_t ir_detected_pub;
 static rcl_publisher_t ir_peer_pub;
 #endif
@@ -184,6 +211,8 @@ static std_msgs__msg__Float32 battery_msg;
 static std_msgs__msg__Float32 servo_angle_msg;
 static std_msgs__msg__UInt32 wheel_l_ticks_msg;
 static std_msgs__msg__UInt32 wheel_r_ticks_msg;
+static std_msgs__msg__Int32 wheel_l_ticks_signed_msg;
+static std_msgs__msg__Int32 wheel_r_ticks_signed_msg;
 static std_msgs__msg__Bool ir_detected_msg;
 static std_msgs__msg__UInt8 ir_peer_msg;
 static sensor_msgs__msg__Range sonar_range_msg;
@@ -214,6 +243,18 @@ static std_msgs__msg__Bool sonar_cal_sweep_msg;
 #endif
 
 static SmoothDrive drv;
+
+static void update_wheel_tick_dirs() {
+  const float cl = drv.cur_left();
+  const float cr = drv.cur_right();
+  if (fabsf(cl) > 0.04f) {
+    wheel_dir_l = (cl > 0.0f) ? 1 : -1;
+  }
+  if (fabsf(cr) > 0.04f) {
+    wheel_dir_r = (cr > 0.0f) ? 1 : -1;
+  }
+}
+
 static Mpu6050 mpu;
 static HeadingHold heading;
 static MotionDetect motion;
@@ -285,6 +326,9 @@ static uint32_t boot_reason_until_ms = 0;
 
 static float last_lin = 0, last_ang = 0;
 static uint32_t last_drive_ms = 0;
+#if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
+static portMUX_TYPE cmd_twist_mux = portMUX_INITIALIZER_UNLOCKED;
+#endif
 static uint32_t last_uros_ping_ms = 0;
 #if defined(ROVER_VL53L) || defined(ROVER_VL53L8)
 static TaskHandle_t tof_task_handle = nullptr;
@@ -896,6 +940,7 @@ static void force_stop(const char *reason) {
   }
 #endif
   drv.stop();
+  rover_cmd_mix_reset_trim();
   if (reason) {
     Serial.printf("DRIVE STOP: %s\n", reason);
   }
@@ -948,8 +993,12 @@ static void poll_mcp_ir(uint32_t now) {
       last_tick_pub = now;
       wheel_l_ticks_msg.data = direct_left_ticks;
       wheel_r_ticks_msg.data = direct_right_ticks;
+      wheel_l_ticks_signed_msg.data = direct_left_ticks_signed;
+      wheel_r_ticks_signed_msg.data = direct_right_ticks_signed;
       RCSOFTCHECK(rcl_publish(&wheel_l_ticks_pub, &wheel_l_ticks_msg, NULL));
       RCSOFTCHECK(rcl_publish(&wheel_r_ticks_pub, &wheel_r_ticks_msg, NULL));
+      RCSOFTCHECK(rcl_publish(&wheel_l_ticks_signed_pub, &wheel_l_ticks_signed_msg, NULL));
+      RCSOFTCHECK(rcl_publish(&wheel_r_ticks_signed_pub, &wheel_r_ticks_signed_msg, NULL));
       tick_pub_count++;
     }
   }
@@ -998,19 +1047,18 @@ static bool create_entities() {
   RCCHECK(rclc_node_init_default(&node, "lego_rover_esp32", "", &support));
   // Drive-critical entities first: /rover/session + cmd_vel and their executor
   // handles. Any later failure still tears everything down (see kConnect).
-  RCCHECK(rclc_subscription_init_default(
+  RCCHECK(rclc_subscription_init_best_effort(
     &session_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "rover/session"));
-  RCCHECK(rclc_subscription_init_default(
+  RCCHECK(rclc_subscription_init_best_effort(
     &sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel"));
   RCCHECK(rclc_executor_init(&executor, &support.context, ROVER_UROS_EXEC_HANDLES, &allocator));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &session_sub, &session_msg, &on_session, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &sub, &cmd_msg, &on_cmd, ON_NEW_DATA));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &imu_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu), "imu/data"));
-  (void)rmw_uros_set_publisher_session_timeout(rcl_publisher_get_rmw_handle(&imu_pub), ROVER_UROS_IMU_PUB_TIMEOUT_MS);
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &drive_diag_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
     "rover/drive_diag"));
   RCCHECK(rclc_publisher_init_default(
@@ -1025,68 +1073,74 @@ static bool create_entities() {
   RCCHECK(rclc_publisher_init_default(
     &drive_mode_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
     "rover/drive_mode"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &battery_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/battery/voltage"));
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &wheel_l_ticks_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
     "rover/wheel/left_ticks"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &wheel_r_ticks_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
     "rover/wheel/right_ticks"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
+    &wheel_l_ticks_signed_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+    "rover/wheel/left_ticks_signed"));
+  RCCHECK(rclc_publisher_init_best_effort(
+    &wheel_r_ticks_signed_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+    "rover/wheel/right_ticks_signed"));
+  RCCHECK(rclc_publisher_init_best_effort(
     &ir_detected_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
     "rover/ir/detected"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &ir_peer_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
     "rover/ir/peer"));
 #endif
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_SONAR)
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_range_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/sonar/range"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_pan_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/sonar/pan_deg"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_avoid_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
     "rover/sonar/avoid_active"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_escape_event_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
     "rover/sonar/escape_event"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_escape_turn_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/sonar/escape_turn"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_escape_best_deg_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/sonar/escape_best_deg"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &sonar_escape_best_m_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/sonar/escape_best_m"));
-  RCCHECK(rclc_subscription_init_default(
+  RCCHECK(rclc_subscription_init_best_effort(
     &sonar_cal_sweep_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
     "rover/sonar/cal_sweep"));
 #endif
 #if defined(ROVER_VL53L)
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &tof_left_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/tof/left"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &tof_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/tof/right"));
 #endif
 #if defined(ROVER_VL53L8)
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &tof_front_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/tof/front"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &tof_front_left_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/tof/front_left"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &tof_front_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
     "rover/tof/front_right"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
     &tof_l8_cols_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
     "rover/tof/l8_cols"));
 #endif
@@ -1096,12 +1150,12 @@ static bool create_entities() {
     &servo_angle_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
     "rover/tof/status"));
 #else
-  RCCHECK(rclc_subscription_init_default(
+  RCCHECK(rclc_subscription_init_best_effort(
     &servo_angle_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "rover/servo/angle"));
 #endif
 #endif
-  RCCHECK(rclc_subscription_init_default(
+  RCCHECK(rclc_subscription_init_best_effort(
     &heartbeat_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
     "rover/heartbeat"));
   RCCHECK(rclc_executor_add_subscription(
@@ -1253,6 +1307,8 @@ static void destroy_entities() {
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_MCP_IR)
   UROS_FINI(rcl_publisher_fini(&wheel_l_ticks_pub, &node));
   UROS_FINI(rcl_publisher_fini(&wheel_r_ticks_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&wheel_l_ticks_signed_pub, &node));
+  UROS_FINI(rcl_publisher_fini(&wheel_r_ticks_signed_pub, &node));
 #endif
 #if defined(ROVER_TDISPLAY_S3) && defined(ROVER_SONAR)
   UROS_FINI(rcl_publisher_fini(&sonar_range_pub, &node));
@@ -1294,6 +1350,70 @@ static void on_session_lost() {
   Serial.println("micro-ROS agent lost — waiting to reconnect...");
 }
 
+#if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
+static void rover_store_cmd_twist(float lin, float ang, uint32_t ms) {
+  portENTER_CRITICAL(&cmd_twist_mux);
+  last_lin = lin;
+  last_ang = ang;
+  last_drive_ms = ms;
+  portEXIT_CRITICAL(&cmd_twist_mux);
+}
+
+static void rover_clear_cmd_twist() {
+  portENTER_CRITICAL(&cmd_twist_mux);
+  last_lin = 0.0f;
+  last_ang = 0.0f;
+  last_drive_ms = 0;
+  portEXIT_CRITICAL(&cmd_twist_mux);
+}
+
+static void rover_read_cmd_twist(float* lin, float* ang, uint32_t* ms) {
+  portENTER_CRITICAL(&cmd_twist_mux);
+  if (lin) {
+    *lin = last_lin;
+  }
+  if (ang) {
+    *ang = last_ang;
+  }
+  if (ms) {
+    *ms = last_drive_ms;
+  }
+  portEXIT_CRITICAL(&cmd_twist_mux);
+}
+
+static void ps4_drive_fn(float linear_x, float angular_z, RoverPs4CmdKind kind) {
+  if (drive_blocked()) {
+    drv.set_target(0.0f, 0.0f);
+    return;
+  }
+  if (kind == kPs4CmdFailsafe) {
+    rover_clear_cmd_twist();
+    if (heading_lock()) {
+      heading.disarm();
+      heading_unlock();
+    }
+    rover_cmd_mix_reset_trim();
+    drv.set_target(0.0f, 0.0f);
+    return;
+  }
+  if (kind == kPs4CmdZero) {
+    rover_store_cmd_twist(0.0f, 0.0f, millis());
+    float l = 0.0f;
+    float r = 0.0f;
+    rover_cmd_mix_twist(0.0f, 0.0f, last_yaw_rate, 0.01f, false, &l, &r);
+    drv.set_target(l, r);
+    return;
+  }
+  if (kind == kPs4CmdTwist) {
+    rover_store_cmd_twist(linear_x, angular_z, millis());
+    float l = 0.0f;
+    float r = 0.0f;
+    rover_cmd_mix_twist(linear_x, angular_z, last_yaw_rate, 0.01f, false, &l, &r);
+    drv.set_target(l, r);
+  }
+}
+#endif
+
 static void apply_drive(float yaw_rate, float dt) {
   if (drive_blocked()) {
     force_stop(nullptr);
@@ -1301,11 +1421,35 @@ static void apply_drive(float yaw_rate, float dt) {
   }
 
   constexpr uint32_t CMD_TIMEOUT_MS = 400;
-  const bool cmd_fresh = (millis() - last_drive_ms) <= CMD_TIMEOUT_MS;
-#if defined(ROVER_SONAR)
-  if (!sonar_drive_override && (!cmd_fresh || !pi_session_sub_value)) {
+  uint32_t cmd_ms = 0;
+  float v = 0.0f;
+  float turn = 0.0f;
+  bool ps4_cmd_active = false;
+#if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
+  const RoverPs4DriveOut ps4 = rover_ps4_espnow_poll(millis());
+  if (ps4.failsafe) {
+    if (heading_lock()) {
+      heading.disarm();
+      heading_unlock();
+    }
+  } else {
+    ps4_cmd_active = ps4.override_ros;
+  }
+  if (ps4_cmd_active) {
+    return;
+  }
+  rover_read_cmd_twist(&v, &turn, &cmd_ms);
 #else
-  if (!cmd_fresh || !pi_session_sub_value) {
+  cmd_ms = last_drive_ms;
+  v = last_lin;
+  turn = last_ang;
+#endif
+  const bool cmd_fresh = cmd_ms != 0 && (millis() - cmd_ms) <= CMD_TIMEOUT_MS;
+
+#if defined(ROVER_SONAR)
+  if (!sonar_drive_override && (!cmd_fresh || (!pi_session_sub_value && !ps4_cmd_active))) {
+#else
+  if (!cmd_fresh || (!pi_session_sub_value && !ps4_cmd_active)) {
 #endif
     drv.set_target(0.0f, 0.0f);
     return;
@@ -1316,136 +1460,59 @@ static void apply_drive(float yaw_rate, float dt) {
     drv.set_target(0.0f, 0.0f);
     return;
   }
+  if (sonar_drive_override) {
+    v = sonar_drive_lin;
+    turn = sonar_drive_ang;
+  }
 #endif
-
-#if defined(ROVER_SONAR)
-  float v = sonar_drive_lin;
-  float turn = sonar_drive_ang;
-#else
-  float v = last_lin;
-  float turn = last_ang;
-#endif
-  float trim = 0;
-
 #if defined(ROVER_SONAR)
   const bool sonar_override = sonar_drive_override;
 #else
   const bool sonar_override = false;
 #endif
-#ifndef FORWARD_LINEAR_SIGN
-#define FORWARD_LINEAR_SIGN 1.0f
-#endif
-  const bool reversing =
-      (FORWARD_LINEAR_SIGN > 0.0f) ? (v < -0.03f) : (v > 0.03f);
-  if (!sonar_override) {
-#if defined(ROVER_VL53L8)
-    if (front_tof.ok() && !reversing && v > 0.02f) {
-      const float fwd = front_tof.range_center_m();
-      // Brain should slow above 55 cm; ESP caps here so we never slam from cruise.
-      if (fwd > 0.02f && fwd < 0.55f) {
-        const float t = (fwd - 0.10f) / 0.45f;
-        const float cap = (t < 0.0f) ? 0.04f : (0.04f + t * 0.10f);
-        if (v > cap) {
-          v = cap;
-        }
-        if (fwd < 0.16f) {
-          v = -0.06f;
-          if (fabsf(turn) > 0.05f) {
-            turn = (turn > 0.0f) ? 0.05f : -0.05f;
-          }
-        }
-      }
-    }
-#endif
-  }
 
-  if (mpu.ok() && !sonar_override) {
-#ifndef HEADING_HOLD
-#define HEADING_HOLD 1
-#endif
-#if HEADING_HOLD
-    if (heading_lock()) {
-      trim = heading.correct(yaw_rate, dt, v, turn);
-      heading_unlock();
-    }
-#endif
-  } else if (heading_lock()) {
-    heading.disarm();
-    heading_unlock();
-  }
-  static float trim_out = 0.0f;
-  const float trim_step = 0.35f * ((dt > 0.0001f && dt < 0.05f) ? dt : 0.01f);
-  if (trim > trim_out + trim_step) {
-    trim_out += trim_step;
-  } else if (trim < trim_out - trim_step) {
-    trim_out -= trim_step;
-  } else {
-    trim_out = trim;
-  }
-  last_heading_trim = trim_out;
-
-  float l, r;
-
-  constexpr float STEER_DEAD = 0.02f;
-
-  // Cruise: forward dominates, steer is a nudge. A real pivot (almost no
-  // forward, a real turn) is allowed — this chassis can rotate on the spot —
-  // but a hallway command must not collapse into one.
-  if (fabsf(turn) < STEER_DEAD) {
-    l = v + trim_out;
-    r = v - trim_out;
-  } else if (fabsf(v) < 0.04f && fabsf(turn) >= STEER_DEAD) {
-    const float spin = fminf(fabsf(turn), 0.10f);
-    turn = (turn > 0.0f) ? spin : -spin;
-    l = -turn;
-    r = turn;
-  } else {
-    float max_turn = fminf(0.06f, fabsf(v) * 0.45f);
-    if (max_turn < 0.03f) {
-      max_turn = 0.03f;
-    }
-    if (fabsf(turn) > max_turn) {
-      turn = (turn > 0.0f) ? max_turn : -max_turn;
-    }
-    l = v - turn;
-    r = v + turn;
-  }
-
-  const float peak = fmaxf(fabsf(l), fabsf(r));
-  if (peak > 1.0f) {
-    l /= peak;
-    r /= peak;
-  }
-
-  l = constrain(l, -1.0f, 1.0f);
-  r = constrain(r, -1.0f, 1.0f);
+  float l = 0.0f;
+  float r = 0.0f;
+  rover_cmd_mix_twist(v, turn, yaw_rate, dt, sonar_override, &l, &r);
+  last_heading_trim = rover_cmd_mix_trim_out();
   drv.set_target(l, r);
+}
+
+static void ingest_cmd_vel_twist(float lin, float ang, bool from_ps4) {
+  if (drive_blocked()) {
+    if (!from_ps4) {
+      diag_cmd_drop++;
+    }
+    return;
+  }
+  if (!from_ps4 && !pi_session_sub_value) {
+    diag_cmd_drop++;
+    return;
+  }
+#if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
+  rover_store_cmd_twist(lin, ang, millis());
+#else
+  last_lin = lin;
+  last_ang = ang;
+  last_drive_ms = millis();
+#endif
+  if (!from_ps4) {
+    last_pi_traffic_ms = millis();
+    bridge_live_latched = true;
+  }
 }
 
 void on_cmd(const void *msgin) {
   diag_cmd_count++;
-  if (drive_blocked()) {
-    diag_cmd_drop++;
-    return;
-  }
-  if (!pi_session_sub_value) {
-    diag_cmd_drop++;
-    return;
-  }
   const auto *msg = (const geometry_msgs__msg__Twist *)msgin;
 #ifndef CMD_VEL_CROSS_FIX
 #define CMD_VEL_CROSS_FIX 0
 #endif
 #if CMD_VEL_CROSS_FIX
-  last_lin = msg->angular.z;
-  last_ang = msg->linear.x;
+  ingest_cmd_vel_twist(static_cast<float>(msg->angular.z), static_cast<float>(msg->linear.x), false);
 #else
-  last_lin = msg->linear.x;
-  last_ang = msg->angular.z;
+  ingest_cmd_vel_twist(static_cast<float>(msg->linear.x), static_cast<float>(msg->angular.z), false);
 #endif
-  last_drive_ms = millis();
-  last_pi_traffic_ms = millis();
-  bridge_live_latched = true;
 }
 
 static void handle_ros_state() {
@@ -1657,9 +1724,8 @@ static bool imu_stationary() {
 #define ROVER_DIAG_PERIOD_MS 100
 #endif
 
-// FreeRTOS IMU sample + /imu/data publish + DIAG tick. Main loop period was
-// 200–500 ms (display/ToF/spin), so millis() gates in loop() could never hit
-// the 20 Hz / 10 Hz targets. This task owns the rates; rcl ops take uros_mu.
+// FreeRTOS IMU sample + /imu/data publish + DIAG tick (25 ms task period).
+// Main loop is too slow for steady sensor rates; this task owns IMU publish.
 static void imu_diag_task(void *param) {
   (void)param;
   static uint32_t last_imu_pub = 0;
@@ -1668,11 +1734,11 @@ static void imu_diag_task(void *param) {
   static bool imu_frame_ready = false;
   TickType_t wake = xTaskGetTickCount();
 
+  constexpr uint32_t IMU_TICK_MS = 25;
+  constexpr uint32_t IMU_PUB_PERIOD_MS = IMU_TICK_MS;
+
   for (;;) {
     const uint32_t now = millis();
-    constexpr uint32_t CMD_TIMEOUT_MS = 400;
-    const bool driving = (now - last_drive_ms) <= CMD_TIMEOUT_MS;
-    const uint32_t imu_period = driving ? 25 : 28;  // ~36 Hz idle target
 
     float ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
     const bool imu_ok = mpu.ok() && mpu.read(ax, ay, az, gx, gy, gz);
@@ -1719,7 +1785,7 @@ static void imu_diag_task(void *param) {
     const bool imu_clear = true;
 #endif
 
-    if (imu_ok && imu_clear && (now - last_imu_pub >= imu_period)) {
+    if (imu_ok && imu_clear && (now - last_imu_pub >= IMU_PUB_PERIOD_MS)) {
       if (!imu_frame_ready) {
         static char imu_frame_id[] = "imu_link";
         imu_msg.header.frame_id.data = imu_frame_id;
@@ -1763,8 +1829,7 @@ static void imu_diag_task(void *param) {
       }
 
       bool do_motion = false;
-      // Wait briefly for executor/tof publishers; 5 ms was dropping ~half the
-      // IMU slots under load (measured ~17 Hz vs 30 ms period target).
+      // Brief uros_mu wait; best-effort publish must not block on reliable ACKs.
       // Only advance last_imu_pub after a successful publish (or when unconnected).
       if (uros_lock(pdMS_TO_TICKS(20))) {
         if (ros_state == RosState::kConnected && entities_ok) {
@@ -1850,9 +1915,7 @@ static void imu_diag_task(void *param) {
     }
 #endif
 
-    // Fixed 25 ms tick: idle publishes every 2nd tick (~20 Hz), driving every tick (~40 Hz).
-    // Keeps schedule tight when DIAG was deferred and when uros_mu briefly contends.
-    constexpr uint32_t IMU_TICK_MS = 25;
+    // One publish per 25 ms tick → ~40 Hz /imu/data (matches task cadence).
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(IMU_TICK_MS));
   }
 }
@@ -2209,6 +2272,7 @@ void setup() {
             drv.hard_stop();
           } else {
             drv.tick();
+            update_wheel_tick_dirs();
           }
           vTaskDelay(pdMS_TO_TICKS(5));
         }
@@ -2262,6 +2326,30 @@ void setup() {
   rover_diag_wifi_ready(reset_reason_str(esp_reset_reason()));
 #ifdef ROVER_TDISPLAY_S3
   ota.beginConnected("rover-esp");
+#endif
+#if defined(ROVER_VL53L8)
+  static const RoverCmdMixPort kMixPort = {
+      []() { return mpu.ok(); },
+      []() { return heading_lock(); },
+      []() { heading_unlock(); },
+      [](float yr, float mix_dt, float lin, float ang) { return heading.correct(yr, mix_dt, lin, ang); },
+      []() { heading.disarm(); },
+      []() { return front_tof.ok(); },
+      []() { return front_tof.range_center_m(); },
+  };
+#else
+  static const RoverCmdMixPort kMixPort = {
+      []() { return mpu.ok(); },
+      []() { return heading_lock(); },
+      []() { heading_unlock(); },
+      [](float yr, float mix_dt, float lin, float ang) { return heading.correct(yr, mix_dt, lin, ang); },
+      []() { heading.disarm(); },
+  };
+#endif
+  rover_cmd_mix_set_port(&kMixPort);
+#if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
+  rover_ps4_set_drive_fn(ps4_drive_fn);
+  rover_ps4_espnow_begin();
 #endif
 #else
   set_microros_serial_transports(PiSerial);
@@ -2369,8 +2457,6 @@ void loop() {
     spin_ros_input();
 #endif
 
-    apply_drive(yaw_rate, dt);
-
     if (imu_bump_pending) {
       imu_bump_pending = false;
       publish_bump_event("IMU jerk");
@@ -2444,6 +2530,8 @@ void loop() {
       RCSOFTCHECK(rcl_publish(&battery_pub, &battery_msg, NULL));
     }
   }
+
+  apply_drive(yaw_rate, dt);
 
   // IMU retry: boot-only detect left IMU dead forever after a slow power-up.
   if (!mpu.ok()) {
@@ -2525,6 +2613,20 @@ void loop() {
                (unsigned long)diag_cmd_count, (unsigned long)diag_cmd_drop);
         if (m > 0) n += m;
       }
+#if defined(ROVER_MICROROS_WIFI) && defined(ENABLE_PS4_ESPNOW)
+      if (n < (int)sizeof(drive_diag_buf) - 1) {
+        RoverPs4LinkStatus ps4s{};
+        rover_ps4_link_status(&ps4s);
+        const int p4 = snprintf(
+            drive_diag_buf + n, sizeof(drive_diag_buf) - n,
+            " ps4_link=%d ps4_man=%d ps4_age=%lu ps4_ch=%u ps4_rx=%lu ps4_ack=%lu ps4_ackdrop=%lu",
+            (int)ps4s.linked, (int)ps4s.manual,
+            ps4s.last_pkt_age_ms == UINT32_MAX ? 0UL : (unsigned long)ps4s.last_pkt_age_ms,
+            (unsigned)ps4s.channel, (unsigned long)ps4s.rx_count, (unsigned long)ps4s.ack_tx,
+            (unsigned long)ps4s.ack_drop);
+        if (p4 > 0) n += p4;
+      }
+#endif
       if (n >= (int)sizeof(drive_diag_buf)) n = sizeof(drive_diag_buf) - 1;
       drive_diag_msg.data.data = drive_diag_buf;
       drive_diag_msg.data.size = (size_t)n;
@@ -2548,6 +2650,16 @@ void loop() {
     Serial.printf(" bat=%.2fV", battery.voltage());
     if (estop.active()) Serial.print(" ESTOP");
     Serial.printf(" pi=%lus", last_pi_traffic_ms ? (unsigned long)((now - last_pi_traffic_ms) / 1000) : 999UL);
+#if defined(ENABLE_PS4_ESPNOW)
+    {
+      RoverPs4LinkStatus ps4s{};
+      rover_ps4_link_status(&ps4s);
+      Serial.printf(" ps4=%d man=%d age=%lu rx=%lu ack=%lu", (int)ps4s.linked, (int)ps4s.manual,
+                    ps4s.last_pkt_age_ms == UINT32_MAX ? 9999UL
+                                                         : (unsigned long)ps4s.last_pkt_age_ms,
+                    (unsigned long)ps4s.rx_count, (unsigned long)ps4s.ack_tx);
+    }
+#endif
 #endif
     Serial.printf(" mpu=%d ent=%d sup=%d up=%lu lost=%lu fail=%lu@%d miss=%lu rssi=%d",
                   (int)mpu.ok(), (int)entities_ok, (int)support_ok,
@@ -2681,6 +2793,15 @@ void loop() {
   ui.menu_hint_until_ms = menu_saved_flash_until;
   ui.key_flash_until_ms = key_flash_until;
   ui.tap_progress = go_button.active_tap_count();
+#if defined(ENABLE_PS4_ESPNOW)
+  {
+    RoverPs4LinkStatus ps4s{};
+    rover_ps4_link_status(&ps4s);
+    ui.ps4_linked = ps4s.linked;
+    ui.ps4_manual = ps4s.manual;
+    ui.ps4_pkt_age_ms = ps4s.last_pkt_age_ms;
+  }
+#endif
   update_pi_bridge_state(now);
   if (pi_session_sub_value) {
     mode_menu_open = false;

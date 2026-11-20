@@ -4,7 +4,8 @@
  * Publishes the brain's expected topics under hostname rover-tof.local.
  * Drive / IMU / motors stay on T-Display (rover-esp.local).
  * Dual I2C: Wire=L8 @ ~800 kHz, Wire1=side VL53 + PCA9685.
- * STL-19P lidar: /rover/scan, frame_id lidar_link (see rover_lidar.h).
+ * STL-19P lidar: /rover/scan_slice (best effort, 4 slices per revolution,
+ * frame_id lidar_link; see scan_slices.h). The NUC rebuilds /rover/scan.
  */
 
 #include <Arduino.h>
@@ -39,6 +40,7 @@
 #include <rclc/executor.h>
 #include <rmw_microros/rmw_microros.h>
 #include <sensor_msgs/msg/laser_scan.h>
+#include "scan_slices.h"
 #include <sensor_msgs/msg/range.h>
 #include <std_msgs/msg/float32_multi_array.h>
 #include <std_msgs/msg/u_int16_multi_array.h>
@@ -187,8 +189,11 @@ bool g_pca_ok = false;
 float g_servo_deg = 90.0f;   // logical: 90 = centre
 volatile bool g_servo_dirty = false;
 rcl_publisher_t ir_detected_pub;
-// /rover/scan — STL-19P, frame lidar_link. Buffers stay static so a reconnect
-// does not allocate, and so the loop task does not carry a 4 KB scan.
+// /rover/scan_slice — STL-19P, frame lidar_link, BEST_EFFORT. One revolution is
+// published as scan_slices::kSlices LaserScans that each fit one datagram; the
+// NUC (scan_assemble.py) rebuilds /rover/scan. Buffers stay static so a
+// reconnect does not allocate, and so the loop task does not carry a 4 KB
+// scan. Slice messages point into these buffers, nothing is copied per slice.
 rcl_publisher_t scan_pub;
 sensor_msgs__msg__LaserScan scan_msg;
 float scan_ranges[stl19p::kScanBins];
@@ -206,8 +211,8 @@ char scan_frame_id[] = "lidar_link";
 // [6] UART FIFO overflow + ring-buffer full, cumulative
 // [7] revolutions closed (LaserScan candidates), cumulative
 // [8] points in the revolution that has not closed yet
-// [9] rcl_publish(/rover/scan) successes, cumulative
-// [10] rcl_publish(/rover/scan) failures, cumulative
+// [9] revolutions with every /rover/scan_slice publish OK, cumulative
+// [10] revolutions with at least one failed slice publish, cumulative
 rcl_publisher_t lidar_diag_pub;
 std_msgs__msg__Float32MultiArray lidar_diag_msg;
 float lidar_diag_data[11];
@@ -697,33 +702,33 @@ bool create_entities() {
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
   RCCHECK(rclc_node_init_default(&node, "lego_rover_tof", "", &support));
 
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_left_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/tof/left"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/tof/right"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_front_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/tof/front"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_front_left_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/tof/front_left"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_front_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/tof/front_right"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_l8_cols_pub, &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
       "rover/tof/l8_cols"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_l8_grid_pub, &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt16MultiArray),
       "rover/tof/l8_grid"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &sonar_range_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
       "rover/sonar/range"));
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &tof_status_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
       "rover/tof/status"));
   RCCHECK(rclc_publisher_init_default(
@@ -749,24 +754,30 @@ bool create_entities() {
   RCCHECK(rclc_publisher_init_default(
       &ir_detected_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
       "rover/tof/ir_rx_edges"));
-  RCCHECK(rclc_publisher_init_default(
+  // BEST_EFFORT slices. micro-ROS best-effort output is a single MTU-sized
+  // buffer with no XRCE fragmentation (rmw types.h:
+  // output_best_effort_stream_buffer[MTU]; one UDP datagram per message), so
+  // the full 4 kB scan had to be RELIABLE, and its 50 ms confirms capped it at
+  // ~5 Hz. Four 125-bin slices (1060 CDR bytes each, static_assert in
+  // scan_slices.h) go best effort at the lidar's ~10 Hz with no confirm wait.
+  RCCHECK(rclc_publisher_init_best_effort(
       &scan_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, LaserScan),
-      "rover/scan"));
+      "rover/scan_slice"));
   memset(&scan_msg, 0, sizeof(scan_msg));
   scan_msg.header.frame_id.data = scan_frame_id;
   scan_msg.header.frame_id.size = sizeof(scan_frame_id) - 1;
   scan_msg.header.frame_id.capacity = sizeof(scan_frame_id);
   scan_msg.ranges.data = scan_ranges;
-  scan_msg.ranges.size = stl19p::kScanBins;
-  scan_msg.ranges.capacity = stl19p::kScanBins;
+  scan_msg.ranges.size = scan_slices::kBinsPerSlice;
+  scan_msg.ranges.capacity = scan_slices::kBinsPerSlice;
   scan_msg.intensities.data = scan_intensities;
-  scan_msg.intensities.size = stl19p::kScanBins;
-  scan_msg.intensities.capacity = stl19p::kScanBins;
+  scan_msg.intensities.size = scan_slices::kBinsPerSlice;
+  scan_msg.intensities.capacity = scan_slices::kBinsPerSlice;
   for (int i = 0; i < stl19p::kScanBins; i++) {
     scan_ranges[i] = std::numeric_limits<float>::quiet_NaN();
     scan_intensities[i] = std::numeric_limits<float>::quiet_NaN();
   }
-  RCCHECK(rclc_publisher_init_default(
+  RCCHECK(rclc_publisher_init_best_effort(
       &lidar_diag_pub, &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
       "rover/tof/lidar"));
@@ -1092,9 +1103,10 @@ void publish_sensors(uint32_t now) {
 
 // Called every loop iteration, including sensor ticks. Gating it on the
 // non-sensor branch meant a loop that spent >=100 ms in publish_sensors()
-// (eleven reliable confirms) never reached this function, so closed
-// revolutions stayed on the board while /rover/scan stayed quiet.
+// never reached this function, so closed revolutions stayed on the board.
 // ToF is published first on a sensor tick; this runs after that.
+// Best-effort publishes do not wait for a confirm, so the four slices cost a
+// few datagram writes, not the 50 ms reliable timeout the full scan could hit.
 void publish_lidar_scan(uint32_t now) {
   if (ros_state != RosState::kConnected || !entities_ok) {
     return;
@@ -1105,22 +1117,32 @@ void publish_lidar_scan(uint32_t now) {
   if (!rover_lidar_copy_scan(&scan, &seq) || seq == last_seq) {
     return;
   }
-  // Advance even when publish fails. Retrying the same scan every 5 ms would
-  // sit in the 50 ms reliable timeout and stall ToF. The next revolution is
-  // ~100 ms later.
+  // Advance even when a slice fails: a lost slice is a wedge the NUC fills
+  // with NaN, and the next revolution is ~100 ms later. Never retry.
   last_seq = seq;
   memcpy(scan_ranges, scan.ranges, sizeof(scan_ranges));
   memcpy(scan_intensities, scan.intensities, sizeof(scan_intensities));
-  scan_msg.angle_min = scan.angle_min;
-  scan_msg.angle_max = scan.angle_max;
   scan_msg.angle_increment = scan.angle_increment;
   scan_msg.time_increment = scan.time_increment;
   scan_msg.scan_time = scan.scan_time;
   scan_msg.range_min = scan.range_min;
   scan_msg.range_max = scan.range_max;
+  // One stamp for every slice of this revolution: the NUC groups on it.
   scan_msg.header.stamp.sec = static_cast<int32_t>(now / 1000);
   scan_msg.header.stamp.nanosec = static_cast<uint32_t>((now % 1000) * 1000000UL);
-  if (rcl_publish(&scan_pub, &scan_msg, NULL) == RCL_RET_OK) {
+  bool all_ok = true;
+  for (int k = 0; k < scan_slices::kSlices; k++) {
+    const scan_slices::SliceGeom g =
+        scan_slices::slice_geom(k, scan.angle_min, scan.angle_increment);
+    scan_msg.angle_min = g.angle_min;
+    scan_msg.angle_max = g.angle_max;
+    scan_msg.ranges.data = scan_ranges + g.first_bin;
+    scan_msg.intensities.data = scan_intensities + g.first_bin;
+    if (rcl_publish(&scan_pub, &scan_msg, NULL) != RCL_RET_OK) {
+      all_ok = false;
+    }
+  }
+  if (all_ok) {
     lidar_scan_pub_ok++;
   } else {
     lidar_scan_pub_fail++;
